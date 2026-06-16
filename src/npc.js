@@ -27,6 +27,22 @@ export const NPC_TUNING = {
     gazeCos: Math.cos(40 * Math.PI / 180), // player "looking at me" cone half-angle
     loseGaze: 0.8,        // s — keep attending this long after the gaze leaves
     region: { x0: -4.5, x1: 2.5, z0: -1.0, z1: 5.0 }, // wander bounds (flat arena)
+
+    // --- Commanded movement (voice-FSM driven). Active only when setCommand()
+    //     is given a state; null/"none" leaves the autonomous wander/attend. ---
+    followSpeed: 2.4,     // m/s — base catch-up speed (player tops out at 2.5 m/s)
+    followCatchup: 1.6,   // x — speed multiplier when far behind (dist > followMax*2)
+    followMin: 1.4,       // m — stop closing once inside this of the player (hysteresis low)
+    followMax: 2.2,       // m — resume closing once beyond this of the player (hysteresis high)
+    followTarget: 2.0,    // m — desired standoff behind the player along their heading
+    closeBand: 1.0,       // m — CLOSE target standoff (tight; overrides player clearance)
+    closeMin: 0.85,       // m — CLOSE stop-closing radius (hysteresis low)
+    closeMax: 1.25,       // m — CLOSE resume-closing radius (hysteresis high)
+    scoutLeash: 3.5,      // m — how far AHEAD of the player SCOUT ranges along heading
+    scoutReturn: 5.0,     // m — if player falls this far behind, SCOUT heads back to FOLLOW
+    restDrift: 0.25,      // m — REST allowed idle drift radius around its hold spot
+    rePathDist: 0.4,      // m — re-path only when player/goal moved this far
+    rePathInterval: 0.3,  // s — or at least this often (whichever first)
 };
 
 // --- tiny 2D (x,z ground-plane) helpers -----------------------------------
@@ -43,7 +59,7 @@ export class NpcBrain {
         this.yaw = yaw;            // facing radians, 0 = +Z
         this.obstacles = obstacles; // kept for minClearance() / demos
         this.nav = navigator;     // NavGrid — engine-clean A* pathfinder
-        this.state = "wander";    // "wander" | "attend"
+        this.state = "wander";    // "wander" | "attend" | <command name>
         this.moving = false;
         this._path = null;        // [{x,z}] world waypoints to the current goal
         this._wp = 0;
@@ -51,16 +67,43 @@ export class NpcBrain {
         this._loseTimer = 0;
         this._stuckT = 0;
         this._stuckRef = { x, z };
+        // Commanded mode: null/"none" => autonomous wander/attend. A voice FSM
+        // state ("FOLLOW"/"WAIT"/...) makes update() dispatch to per-command
+        // movement instead. The companion roams until the player commands it.
+        this.command = null;
+        this._cmdGoal = null;     // current commanded goal {x,z}, for re-path throttle
+        this._rePathT = 0;        // s since last re-path
+        this._closing = false;    // FOLLOW/CLOSE hysteresis latch (are we closing in?)
+        this._restAnchor = null;  // REST hold spot
         this._pickTarget();
     }
 
     setObstacles(obs) { this.obstacles = obs; }
 
-    // world: { player: {x,z} | null, gaze: {x,z} | null } — gaze is the
-    // player's normalized horizontal look direction.
+    // Set the commanded movement state (a voice-FSM state string), or null /
+    // "none" to release back to autonomous wander/attend. Idempotent re-issues
+    // of the same command are harmless (they just keep the mode active).
+    setCommand(state) {
+        const next = (!state || state === "none") ? null : state;
+        if (next === this.command) return;
+        this.command = next;
+        // Fresh command: drop any stale autonomous/commanded path + latches so the
+        // new behaviour re-plans from the current pose.
+        this._path = null; this._cmdGoal = null; this._rePathT = 0;
+        this._closing = false; this._restAnchor = null;
+        if (next === null) { this.state = "wander"; this._pickTarget(); }  // resume wander cleanly
+    }
+
+    // world: { player: {x,z} | null, gaze: {x,z} | null, heading: {x,z} | null }
+    // — gaze is the player's normalized horizontal look direction; heading is
+    // their normalized travel direction (falls back to gaze when not moving).
     update(dt, world) {
         const T = NPC_TUNING;
         const player = world && world.player;
+
+        // Commanded mode short-circuits the autonomous wander/attend.
+        if (this.command) { this._commanded(dt, world); return this._out(); }
+
         const toPlayer = player ? sub(player, this.pos) : null;
         const dPlayer = toPlayer ? len(toPlayer) : Infinity;
         const looking = (player && world.gaze)
@@ -127,6 +170,162 @@ export class NpcBrain {
             this._stuckT = 0; this._stuckRef = { x: this.pos.x, z: this.pos.z };
             if (prog < 0.12) { this._path = null; this._beginPause(); }
         }
+    }
+
+    // ===== Commanded movement (voice-FSM driven) ==========================
+    // Dispatch on this.command. Sets this.state to the command name so the HUD
+    // / walk-idle blend reflect it. Engine-clean: same pathfind + slewYaw
+    // primitives as wander.
+    _commanded(dt, world) {
+        const player = world && world.player;
+        const heading = this._heading(world);
+        this.state = this.command;
+        if (!player) { this.moving = false; return; }   // nothing to anchor to
+        switch (this.command) {
+            case "FOLLOW": this._cmdFollow(dt, player, heading, NPC_TUNING.followMin, NPC_TUNING.followMax, false); break;
+            case "CLOSE":  this._cmdFollow(dt, player, heading, NPC_TUNING.closeMin, NPC_TUNING.closeMax, true); break;
+            case "SCOUT":  this._cmdScout(dt, player, heading); break;
+            case "GUARD":  this._cmdHold(dt, player, /*faceOut*/true); break;
+            case "ENGAGE": this._cmdEngage(dt, player, heading); break;
+            case "REST":   this._cmdRest(dt, player); break;
+            case "WAIT":   // fallthrough — stop, face the player, hold
+            default:       this._cmdHold(dt, player, /*faceOut*/false); break;
+        }
+    }
+
+    // Player travel direction (normalized x,z) or gaze fallback or null.
+    _heading(world) {
+        const h = world && world.heading;
+        if (h && (Math.abs(h.x) > 1e-3 || Math.abs(h.z) > 1e-3)) return norm(h);
+        const g = world && world.gaze;
+        return g ? norm(g) : null;
+    }
+
+    // Path to `goal` and step one frame toward it at `speed`. Re-paths only when
+    // the goal moved > rePathDist or every rePathInterval (throttle), not every
+    // frame. Returns { arrived, dist } where dist is the straight-line gap to the
+    // goal. Faces travel direction while moving.
+    _goTo(goal, dt, speed) {
+        const T = NPC_TUNING;
+        const gap = len(sub(goal, this.pos));
+        this._rePathT += dt;
+        const goalMoved = !this._cmdGoal || len(sub(goal, this._cmdGoal)) > T.rePathDist;
+        if (!this._path || goalMoved || this._rePathT >= T.rePathInterval) {
+            this._cmdGoal = { x: goal.x, z: goal.z };
+            this._rePathT = 0;
+            this._path = this.nav ? this.nav.findPath(this.pos, goal) : [{ x: goal.x, z: goal.z }];
+            this._wp = 0;
+        }
+        if (!this._path || !this._path.length) { this.moving = false; return { arrived: gap < T.arriveDist, dist: gap }; }
+
+        let wp = this._path[this._wp];
+        let to = sub(wp, this.pos), dist = len(to);
+        while (dist < T.arriveDist && this._wp < this._path.length - 1) {
+            this._wp++; wp = this._path[this._wp]; to = sub(wp, this.pos); dist = len(to);
+        }
+        if (dist < T.arriveDist) { this.moving = false; return { arrived: gap < T.arriveDist, dist: gap }; }
+
+        const v = norm(to);
+        this.pos.x += v.x * speed * dt;
+        this.pos.z += v.z * speed * dt;
+        this.moving = true;
+        this._slewYaw(Math.atan2(v.x, v.z), dt);
+        return { arrived: false, dist: gap };
+    }
+
+    // FOLLOW / CLOSE: keep a standoff band behind the player. Hysteresis on the
+    // distance so it doesn't jitter at the band edge. `tight` (CLOSE) ignores the
+    // wander player-clearance so it may sit inside the close band.
+    _cmdFollow(dt, player, heading, stopMin, resumeMax, tight) {
+        const T = NPC_TUNING;
+        const d = len(sub(player, this.pos));
+        // Hysteresis: start closing when beyond resumeMax, stop when inside stopMin.
+        if (d > resumeMax) this._closing = true;
+        else if (d < stopMin) this._closing = false;
+
+        if (!this._closing) {
+            // Holding: stop, face the player.
+            this.moving = false;
+            this.faceYaw = Math.atan2(player.x - this.pos.x, player.z - this.pos.z);
+            this._slewYaw(this.faceYaw, dt);
+            return;
+        }
+        // Aim for a point a short standoff behind the player along their heading
+        // (so it tucks in behind rather than crowding the camera). No heading =>
+        // just the player position.
+        const stand = tight ? T.closeBand : T.followTarget;
+        const goal = heading
+            ? { x: player.x - heading.x * stand, z: player.z - heading.z * stand }
+            : { x: player.x, z: player.z };
+        // Catch-up: sprint when a long way back.
+        const speed = (d > resumeMax * 2) ? T.followSpeed * T.followCatchup : T.followSpeed;
+        this._goTo(goal, dt, speed);
+        if (!tight) this._separate(player, T.clearance);  // FOLLOW respects wander berth
+        // Face travel dir while moving (set by _goTo); if it stalled, face player.
+        if (!this.moving) this._slewYaw(Math.atan2(player.x - this.pos.x, player.z - this.pos.z), dt);
+    }
+
+    // SCOUT: range ahead of the player along their heading, clamped to a free
+    // navmesh cell. Advances as the player moves forward; if the player falls too
+    // far behind, fall back toward the FOLLOW band.
+    _cmdScout(dt, player, heading) {
+        const T = NPC_TUNING;
+        const back = len(sub(this.pos, player));
+        if (back > T.scoutReturn) { // player left behind — regroup like FOLLOW
+            this._cmdFollow(dt, player, heading, T.followMin, T.followMax, false);
+            return;
+        }
+        const dir = heading || { x: 0, z: 1 };
+        let goal = { x: player.x + dir.x * T.scoutLeash, z: player.z + dir.z * T.scoutLeash };
+        if (this.nav) goal = this._clampFree(goal);
+        const r = this._goTo(goal, dt, T.followSpeed);
+        if (r.arrived) { this.moving = false; this._slewYaw(Math.atan2(dir.x, dir.z), dt); }
+    }
+
+    // WAIT / GUARD: hold position. WAIT faces the player; GUARD faces OUTWARD
+    // (away from the player) — posture stub, no enemy targeting yet.
+    _cmdHold(dt, player, faceOut) {
+        this.moving = false;
+        const dx = faceOut ? (this.pos.x - player.x) : (player.x - this.pos.x);
+        const dz = faceOut ? (this.pos.z - player.z) : (player.z - this.pos.z);
+        if (Math.abs(dx) > 1e-4 || Math.abs(dz) > 1e-4) this._slewYaw(Math.atan2(dx, dz), dt);
+    }
+
+    // REST: relaxed hold near the player with a small idle drift; face the player.
+    _cmdRest(dt, player) {
+        const T = NPC_TUNING;
+        if (!this._restAnchor) this._restAnchor = { x: this.pos.x, z: this.pos.z };
+        // Allow small drift back toward the anchor if nudged out (mostly idle).
+        const off = len(sub(this.pos, this._restAnchor));
+        if (off > T.restDrift) {
+            const r = this._goTo(this._restAnchor, dt, NPC_TUNING.walkSpeed);
+            if (r.arrived) this.moving = false;
+        } else {
+            this.moving = false;
+        }
+        this._slewYaw(Math.atan2(player.x - this.pos.x, player.z - this.pos.z), dt);
+    }
+
+    // ENGAGE: posture stub — hold and face the player's forward/heading. No enemy
+    // to chase yet. TODO(combat): drive to the target and strafe/cover here.
+    _cmdEngage(dt, player, heading) {
+        this.moving = false;
+        const dir = heading || norm(sub(player, this.pos));
+        if (dir && (Math.abs(dir.x) > 1e-4 || Math.abs(dir.z) > 1e-4)) this._slewYaw(Math.atan2(dir.x, dir.z), dt);
+    }
+
+    // Push out of the player so we keep `r` separation (dynamic obstacle).
+    _separate(player, r) {
+        const d = sub(this.pos, player), l = len(d);
+        if (l < r && l > 1e-3) { this.pos.x = player.x + d.x / l * r; this.pos.z = player.z + d.z / l * r; }
+    }
+
+    // Clamp a world goal to the nearest free navmesh cell centre (and bounds).
+    _clampFree(goal) {
+        if (this.nav.isFree(goal.x, goal.z)) return goal;
+        const c = this.nav._nearestFreeCell(goal.x, goal.z);
+        if (!c) return goal;
+        return { x: this.nav._wx(c.ix), z: this.nav._wz(c.iz) };
     }
 
     _beginPause() {

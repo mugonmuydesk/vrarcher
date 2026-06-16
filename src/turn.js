@@ -229,7 +229,13 @@ export function loadSmartTurn(opts = {}) {
     return _smartTurn.loading;
 }
 
-// Build (once) a TurnSense text-EoU scorer via transformers.js from CDN.
+// Build (once) a TurnSense text-EoU scorer via transformers.js from CDN. NOTE: the
+// PRODUCTION path is now src/turnsense.js (vendored int8 ONNX + a verified byte-level
+// BPE tokenizer, scores bit-for-bit vs the Python reference), injected through
+// setTextScorer() exactly like Smart Turn — see main.js. This transformers.js CDN
+// loader is kept only as a no-vendor fallback; the real I/O contract (output
+// "probabilities" [1,2], index 1 = P(complete), softmax inside the graph) lives in
+// turnsense.js. Prefer createTurnSenseScorer().
 export function loadTurnSense(opts = {}) {
     if (_turnSense.scorer) return Promise.resolve(_turnSense.scorer);
     if (_turnSense.loading) return _turnSense.loading;
@@ -305,6 +311,15 @@ export class TurnDetector {
     // Pass null to revert to the on-demand / abstain path. PORT: the native scorer
     // loads async too (ONNX session init) and is injected through the same seam.
     setAudioScorer(fn) { this._injectedAudio = fn || null; }
+
+    // Inject (or clear) the text EoU scorer AFTER construction — the symmetric seam for
+    // TurnSense. main.js builds the TurnSense scorer asynchronously (ORT wasm + the int8
+    // model + the BPE tokenizer), then calls this once it resolves, exactly mirroring
+    // setAudioScorer / Smart Turn. An injected text scorer takes precedence over the
+    // useTurnSense CDN loader AND the built-in heuristic (it's a "model" source, so it
+    // counts toward requireBothAgree). Pass null to revert to the heuristic/abstain path.
+    // PORT: the native text scorer loads async too (ONNX session init) — same seam.
+    setTextScorer(fn) { this._injectedText = fn || null; }
 
     // ── PUBLIC API ──────────────────────────────────────────────────────────
     // Run at a VAD silence boundary. All fields optional; the detector always

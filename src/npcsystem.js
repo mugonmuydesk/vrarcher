@@ -35,9 +35,15 @@ export class NpcSystem {
     async _load() {
         // Build the navmesh once from the static props; the brain A*-routes on
         // it so the NPC walks AROUND obstacles instead of into them. Bounds =
-        // the wander region (out-of-region props still block in-region cells).
+        // the player play-area (the ground mesh bounding box, inset to match
+        // locomotion's clamp — locomotion.js LOCO_TUNING.boundsInset = 0.3) so
+        // the commanded companion can path to wherever the player can walk. Fall
+        // back to the hardcoded wander region if the ground isn't available.
+        const region = this._playRegion() || NPC_TUNING.region;
+        NPC_TUNING.region = region;   // the wander path uses this too
+        this._region = region;
         this.nav = new NavGrid({
-            bounds: NPC_TUNING.region,
+            bounds: region,
             cell: 0.3,
             obstacles: this._obstacles,
             clearance: NPC_TUNING.clearance,
@@ -75,14 +81,37 @@ export class NpcSystem {
         this.ctx.updatables.push((dt) => this.update(dt));
     }
 
-    // Player ground position + normalized horizontal look direction.
+    // Play-area bounds = the ground mesh's world bounding box, inset 0.3 m to
+    // match locomotion's player clamp (LOCO_TUNING.boundsInset). Returns a
+    // {x0,x1,z0,z1} region, or null if the ground isn't ready (caller falls back
+    // to the hardcoded NPC_TUNING.region).
+    _playRegion() {
+        const g = this.ctx.ground;
+        if (!g || !g.getBoundingInfo) return null;
+        const bb = g.getBoundingInfo().boundingBox;
+        const inset = 0.3; // keep in sync with locomotion.js LOCO_TUNING.boundsInset
+        return {
+            x0: bb.minimumWorld.x + inset, x1: bb.maximumWorld.x - inset,
+            z0: bb.minimumWorld.z + inset, z1: bb.maximumWorld.z - inset,
+        };
+    }
+
+    // Player ground position + normalized horizontal look direction + travel
+    // heading. heading = the player's locomotion velocity flattened/normalized
+    // when they're actually moving, else null (the brain falls back to gaze).
     _world() {
         const cam = this.ctx.scene.activeCamera;
-        if (!cam) return { player: null, gaze: null };
+        if (!cam) return { player: null, gaze: null, heading: null };
         const p = cam.globalPosition;
         const f = cam.getDirection(BABYLON.Axis.Z);
         const gl = Math.hypot(f.x, f.z) || 1;
-        return { player: { x: p.x, z: p.z }, gaze: { x: f.x / gl, z: f.z / gl } };
+        let heading = null;
+        const v = this.ctx.locomotion?.velocity;
+        if (v) {
+            const vl = Math.hypot(v.x, v.z);
+            if (vl > 0.15) heading = { x: v.x / vl, z: v.z / vl }; // > ~0.15 m/s = moving
+        }
+        return { player: { x: p.x, z: p.z }, gaze: { x: f.x / gl, z: f.z / gl }, heading };
     }
 
     update(dt) {

@@ -24,6 +24,7 @@ import { Barks } from "./barks.js";
 import { createVad } from "./vad.js";
 import { TurnDetector } from "./turn.js";
 import { createSmartTurnScorer } from "./smartturn.js";
+import { createTurnSenseScorer } from "./turnsense.js";
 import { SttStream } from "./stt-stream.js";
 import { Target } from "./target.js";
 import { HoverButton, FingertipButton } from "./buttons.js";
@@ -35,6 +36,7 @@ import { Locomotion } from "./locomotion.js";
 import { applyLightmaps } from "./lightmaps.js";
 import { BlobShadows } from "./blobshadow.js";
 import { BirdSystem } from "./birds.js";
+import { NpcHud } from "./npchud.js";
 import { Interactable } from "./interaction.js";
 import { installRig } from "../debug/rigctl.js";
 
@@ -349,6 +351,151 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     const _ttsParam = new URLSearchParams(location.search).get("tts");
     await ctx.setVoiceBackend(["wasm", "q32", "gemini"].includes(_ttsParam) ? _ttsParam : "gemini");
 
+    // STT (speech-to-text) backend, switchable live — mirrors the TTS switch above:
+    //   "gemini" — cloud transcription via the proxy (geminiTranscribe); DEFAULT.
+    //   "vosk"   — on-device Vosk (Kaldi WASM, src/vosk.js); fully offline, no cloud.
+    //              Lazy-loaded ONLY when selected: the ~40 MB model is never fetched
+    //              on the default Gemini path. While the model downloads/untars the
+    //              transcriber isn't ready, so we keep Gemini live until it resolves,
+    //              then swap ctx.voicechat.transcribe to Vosk (and fall back to Gemini
+    //              if the load fails). ctx.sttBackend = current name; ctx.sttStatus =
+    //              human string. ?stt=vosk overrides the default.
+    // Selecting "vosk" moves BOTH STT surfaces on-device: the batch transcribe
+    // (`ctx.voicechat.transcribe`, used by push-to-talk / the final fallback) AND the
+    // LIVE streaming partials (`ctx.voicechat.stt`, the hands-free per-turn driver).
+    // The cloud SttStream (stt-stream.js) is held in `_geminiStt` and restored when
+    // switching back to "gemini", so the default cloud path is fully reinstated.
+    const _geminiTranscribe = ctx.voicechat.transcribe;   // the default injected fn
+    // The cloud SttStream is created later (ctx.stt, line below) and attached via
+    // attachHandsFree, so resolve it lazily at swap time rather than capturing now.
+    const _geminiStt = () => ctx.stt;                     // the default cloud SttStream
+    ctx.sttBackend = "gemini";
+    ctx.sttStatus = "Gemini: cloud";
+    let _voskTr = null;                                    // cached Vosk transcriber handle
+    let _voskStt = null;                                   // cached VoskSttStream (live partials)
+    let _liveStt = null;                                   // cached GeminiLiveSttStream (true streaming)
+    ctx.setSttBackend = async (name) => {
+        if (name === "gemini-live") {
+            // True streaming STT over the Gemini Live WebSocket (gemini-live-stt.js):
+            // replaces only the LIVE streaming-partials surface (ctx.voicechat.stt).
+            // The batch transcribe (push-to-talk / final fallback) stays cloud Gemini
+            // — Live is a per-turn streaming socket, not a one-shot transcriber. Same
+            // start/pushAudio/stop/cancel contract, so voicechat.js is unchanged.
+            ctx.sttBackend = "gemini-live";
+            try {
+                const mod = await import("./gemini-live-stt.js");
+                if (ctx.sttBackend !== "gemini-live") return;   // switched away mid-load
+                ctx.voicechat.transcribe = _geminiTranscribe;   // batch stays cloud Gemini
+                _liveStt = _liveStt || new mod.GeminiLiveSttStream();
+                ctx.voicechat.stt = _liveStt;
+                ctx.sttStatus = "Gemini Live: streaming (cloud WS)";
+                console.log("[main] STT backend: gemini-live — true streaming over Live WebSocket");
+            } catch (e) {
+                ctx.sttBackend = "gemini";
+                ctx.voicechat.transcribe = _geminiTranscribe;
+                ctx.voicechat.stt = _geminiStt();
+                ctx.sttStatus = "Gemini Live: load failed → Gemini";
+                console.warn("[main] Gemini Live STT load failed; staying on cloud re-transcription:", e?.message || e);
+            }
+        } else if (name === "vosk") {
+            ctx.sttBackend = "vosk";
+            ctx.sttStatus = "Vosk: loading…";
+            console.log("[main] STT backend: vosk — loading (on-device, ~40 MB model)…");
+            try {
+                const mod = await import("./vosk.js");
+                _voskTr = _voskTr || await mod.createVoskTranscriber();   // warms the shared model
+                if (ctx.sttBackend !== "vosk") return;     // switched away mid-load
+                ctx.voicechat.transcribe = (audio, rate) => _voskTr.transcribe(audio, rate);
+                // Swap the live-partials stream on-device too. The model is now warm
+                // (createVoskTranscriber resolved), so VoskSttStream.start() is fast.
+                _voskStt = _voskStt || new mod.VoskSttStream();
+                ctx.voicechat.stt = _voskStt;
+                ctx.sttStatus = "Vosk: ready (on-device)";
+                console.log("[main] STT backend: vosk — ready (on-device, offline; partials + final)");
+            } catch (e) {
+                // Load failed → stay on Gemini so STT keeps working (both surfaces).
+                ctx.sttBackend = "gemini";
+                ctx.voicechat.transcribe = _geminiTranscribe;
+                ctx.voicechat.stt = _geminiStt();
+                ctx.sttStatus = "Vosk: load failed → Gemini";
+                console.warn("[main] Vosk STT load failed; staying on Gemini:", e?.message || e);
+            }
+        } else {
+            ctx.sttBackend = "gemini";
+            ctx.voicechat.transcribe = _geminiTranscribe;
+            ctx.voicechat.stt = _geminiStt();              // restore the cloud streaming partials
+            ctx.sttStatus = "Gemini: cloud";
+            console.log("[main] STT backend: gemini — cloud");
+        }
+    };
+    const _sttQuery = new URLSearchParams(location.search);
+    const _sttParam = _sttQuery.get("stt");
+    // ?livestt=1 is shorthand for ?stt=gemini-live (true streaming over the Live WS).
+    const _wantLive = _sttParam === "gemini-live" || _sttQuery.get("livestt") === "1";
+    if (_sttParam === "vosk") ctx.setSttBackend("vosk");          // lazy; don't block startup
+    else if (_wantLive) ctx.setSttBackend("gemini-live");        // lazy; don't block startup
+    else console.log("[main] STT backend:", ctx.sttBackend, "—", ctx.sttStatus);
+
+    // Dialogue-BRAIN backend, switchable live — mirrors the STT/TTS switches:
+    //   "gemini"   — cloud LLM (gemini.js GeminiBrain); DEFAULT. Open-ended chat.
+    //   "scripted" — Tier-1 on-device FSM (companion-brain.js): an intent
+    //                classifier (Model2Vec, ~30 MB, no LLM/network) maps spoken
+    //                commands to companion STATES and replies with a short
+    //                in-character ack. Lazy-loaded ONLY when selected (the matrix
+    //                is never fetched on the default Gemini path). Selecting it
+    //                swaps ctx.voicechat.brain to a CompanionBrain; selecting
+    //                "gemini" restores the original Gemini brain we keep a handle
+    //                to. ctx.brainBackend = current name. ?brain=scripted overrides.
+    const _geminiBrain = ctx.voicechat.brain;   // the default brain VoiceChat built
+    ctx.brainBackend = "gemini";
+    let _scriptedBrain = null;                   // cached CompanionBrain handle
+    ctx.setBrainBackend = async (name) => {
+        if (name === "scripted") {
+            try {
+                const mod = await import("./companion-brain.js");
+                if (!_scriptedBrain) {
+                    _scriptedBrain = new mod.CompanionBrain({
+                        // Live game state for ASK / query intents ("what's my
+                        // score?", "how many arrows do I have?"). Reported, never
+                        // a movement command. Engine-clean: the brain only sees
+                        // this plain snapshot, never ctx/Babylon.
+                        gameState: () => ({
+                            score: ctx.target?.score ?? 0,
+                            hits: ctx.target?.hits ?? 0,
+                            arrows: ctx.arrows?.live?.length ?? 0,
+                        }),
+                    });
+                    // Drive the NPC's commanded-movement layer off EVERY confident
+                    // command (onCommand, not onStateChange — a re-issued "follow me"
+                    // must re-assert FOLLOW even when already in it). The NPC boots on
+                    // wander (command=null) until the first command arrives.
+                    _scriptedBrain.onCommand(cmd => ctx.npcs?.npcs?.[0]?.brain?.setCommand(cmd.state));
+                }
+                ctx.voicechat.brain = _scriptedBrain;
+                ctx.brainBackend = "scripted";
+                // Scripted replies are terse, so no filled-pause masking.
+                ctx.voicechat.brain.fillers = false;
+                console.log("[main] brain backend: scripted — on-device FSM (no LLM)");
+            } catch (e) {
+                ctx.voicechat.brain = _geminiBrain;
+                ctx.brainBackend = "gemini";
+                console.warn("[main] scripted brain load failed; staying on Gemini:", e?.message || e);
+            }
+        } else {
+            ctx.voicechat.brain = _geminiBrain;
+            ctx.brainBackend = "gemini";
+            // Leaving the scripted FSM: release the companion back to autonomous
+            // wander (no voice commands drive it on the Gemini path).
+            ctx.npcs?.npcs?.[0]?.brain?.setCommand(null);
+            // Restore filled-pause masking for the Gemini path on the Gemini voice.
+            if (_geminiBrain) _geminiBrain.fillers = (ctx.voiceBackend === "gemini");
+            console.log("[main] brain backend: gemini — cloud LLM");
+        }
+    };
+    const _brainParam = new URLSearchParams(location.search).get("brain");
+    if (_brainParam === "scripted") ctx.setBrainBackend("scripted");   // lazy
+    else console.log("[main] brain backend:", ctx.brainBackend, "— cloud LLM");
+
     // Voice-backend switch panel (WASM / q32 / Gemini), to the player's left-front.
     ctx.voicePanel = new VoicePanel(ctx, { position: new BABYLON.Vector3(-0.7, 1.15, 0.5) });
 
@@ -360,6 +507,14 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     ctx.addressing.onTargetChange((npc) => {
         for (const n of (ctx.npcs?.npcs ?? [])) if (n.brain) n.brain.state = (n === npc) ? "attend" : (n.brain.state === "attend" ? "idle" : n.brain.state);
     });
+
+    // DEBUG telemetry HUD — a billboarded panel above the companion NPC's head
+    // showing its FSM state + a live trace of the voice/decision pipeline (heard →
+    // intent → vad → turn → npc). UI-only adapter (npchud.js): READS ctx.voicechat
+    // / .vad / .npcs each frame, null-guarding until they load. On by default for
+    // in-headset tuning; ctx.npchud.toggle() hides it. Built here because it reads
+    // ctx.npcs + ctx.voicechat + ctx.addressing, all of which exist by now.
+    ctx.npchud = new NpcHud(ctx);
 
     // Hands-free voice loop (Phase 2–4): always-on mic + Silero VAD + turn
     // detection + streaming STT, gated by the gaze addressing target. The mic
@@ -389,6 +544,22 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
             console.log("[main] Smart Turn v3 audio EoU armed");
         })
         .catch((e) => console.warn("[main] Smart Turn unavailable; turn-end uses gaze+silence+heuristic:", e?.message || e));
+    // TurnSense (text EoU) — the text complement to Smart Turn's acoustics. OFF by
+    // default: the int8 ONNX is ~176 MB (20× Smart Turn's 8.7 MB) and Smart Turn already
+    // covers EoU, so this is opt-in. Enable with ?turnsense=1 (or window.VR_USE_TURNSENSE
+    // = true before main runs) to load + inject it, mirroring Smart Turn's setAudioScorer
+    // wiring. On any load failure we log and leave the audio+heuristic+silence path intact.
+    const _useTurnSense = (typeof window !== "undefined") &&
+        (window.VR_USE_TURNSENSE === true ||
+         (typeof location !== "undefined" && /[?&]turnsense=1\b/.test(location.search)));
+    if (_useTurnSense) {
+        createTurnSenseScorer()
+            .then((textEouScore) => {
+                ctx.turn.setTextScorer(textEouScore);
+                console.log("[main] TurnSense text EoU armed (int8 ~176 MB)");
+            })
+            .catch((e) => console.warn("[main] TurnSense unavailable; turn-end uses audio+gaze+silence+heuristic:", e?.message || e));
+    }
     ctx.stt = new SttStream();              // streaming-feel transcription over the warm mic
     createVad({
         // TEN-VAD is the default: it recognizes the real (quiet) browser mic where
@@ -403,6 +574,13 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     }).then((vad) => {
         ctx.vad = vad;
         ctx.voicechat.attachHandsFree({ vad, turn: ctx.turn, stt: ctx.stt });
+        // attachHandsFree just set ctx.voicechat.stt to the cloud stream (ctx.stt).
+        // If a non-default STT backend was selected before the mic came up (e.g.
+        // ?stt=vosk or ?livestt=1), re-apply it so attachHandsFree's reset to the
+        // cloud re-transcription stream doesn't clobber it. setSttBackend is
+        // idempotent and any model load is cached.
+        if (ctx.sttBackend === "vosk") ctx.setSttBackend("vosk");
+        else if (ctx.sttBackend === "gemini-live") ctx.setSttBackend("gemini-live");
         console.log("[main] hands-free voice armed — VAD backend:", vad.backend);
     }).catch((e) => {
         // createVad() never throws (graceful fallback), but guard anyway so a
