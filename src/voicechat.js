@@ -802,6 +802,7 @@ export class VoiceChat {
         const step = dt / VOICE_TUNING.fade;
         this._alpha = want > this._alpha ? Math.min(want, this._alpha + step) : Math.max(want, this._alpha - step);
         const plane = this._plane;
+        if (!plane) return;   // front-of-player panel removed (replies show on the NPC HUD)
         if (this._alpha <= 0.001) { if (plane.isEnabled()) plane.setEnabled(false); return; }
         if (!plane.isEnabled()) plane.setEnabled(true);
         plane.visibility = this._alpha;
@@ -818,30 +819,13 @@ export class VoiceChat {
         }
     }
 
-    // --- panel (DynamicTexture plane, billboarded toward the player) ------
+    // Front-of-player transcript panel REMOVED. Companion replies are voiced in
+    // Tiers 2/3 and shown on the NPC head HUD (npchud.js) in Tier-1 text-only
+    // mode. The dialogue state machine still tracks lastText/lastReply (read by
+    // the HUD); with _plane null, _render() and the panel-follow tick are no-ops.
     _buildPanel() {
-        const scene = this.ctx.scene;
-        const T = VOICE_TUNING;
-        const tex = new BABYLON.DynamicTexture("voicePanelTex", { width: T.texW, height: T.texH }, scene, false);
-        tex.hasAlpha = true;
-        this._tex = tex;
-
-        const mat = new BABYLON.StandardMaterial("voicePanelMat", scene);
-        mat.diffuseTexture = tex;
-        mat.opacityTexture = tex;
-        mat.emissiveColor = new BABYLON.Color3(0.9, 0.9, 0.9);
-        mat.disableLighting = true;
-        mat.backFaceCulling = false;
-
-        const plane = BABYLON.MeshBuilder.CreatePlane("voicePanel",
-            { width: T.panelWidth, height: T.panelHeight }, scene);
-        plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
-        plane.material = mat;
-        plane.isPickable = false;
-        plane.visibility = 0;
-        plane.setEnabled(false);
-        this._plane = plane;
-        this._render();
+        this._plane = null;
+        this._tex = null;
     }
 
     _wrap(text, n) {
@@ -857,6 +841,7 @@ export class VoiceChat {
     }
 
     _render() {
+        if (!this._plane) return;   // panel removed — nothing to draw
         const T = VOICE_TUNING;
         const g = this._tex.getContext();
         g.clearRect(0, 0, T.texW, T.texH);

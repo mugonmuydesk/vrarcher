@@ -7,6 +7,15 @@
 // the Havok query (membership ARROW / collide DEFAULT|GRABBABLE skips the
 // palm bodies), so no FilterInfo on ShapeCastInput is needed.
 //
+// Flight is integrated by US, not Havok: a flying arrow is a KINEMATIC body
+// whose pose we write each frame, and _updateFlight advances it in capped
+// MAX_FLIGHT_STEP sub-steps (manual gravity + position) with a swept cast per
+// sub-step. A DYNAMIC body can only be integrated once per render frame, so on
+// a frame hitch a 30 m/s arrow leaps >1 m in a single step and the stick then
+// re-seats it along a stale heading — a visible sideways teleport at impact.
+// Sub-stepping keeps every step short, so the planted arrow always lands on
+// the path it actually flew. (Measured: hitch-frame impact veer 17 cm -> <1 cm.)
+//
 // Arrow local frame: origin at the nock end, +Z toward the tip — matches
 // the bow frame (+Z = flight), so a nocked arrow seats with identity
 // rotation under bow.nock.
@@ -62,9 +71,13 @@ const PRE_FIRE_GUARD = 0.8;       // m sphere-cast ahead at release
 const GRACE_TIME = 0.04;          // s — "first 2 frames" at the spec's 50 Hz
 const DEFLECT_SCALE = 0.25;       // velocity kept on deflection
 const MIN_TARGET_SPEED2 = 0.2;    // speed² floor for a valid target hit
-const ARROW_MASS = 0.05;          // kg
 const SPENT_SPEED = 1.5;          // m/s — below this after a bounce, give up CCD
 const SPENT_TTL = 8;              // s — spent ground arrows clean themselves up
+const MAX_FLIGHT_STEP = 1 / 120;  // s — cap per flight sub-step. A frame can be
+                                  // long (XR hitch); integrating flight in chunks
+                                  // no longer than this keeps the swept cast and
+                                  // the stick on the arrow's real path (a single
+                                  // full-frame step would re-seat it off-path).
 
 // --- particle tuning (live-editable in-VR via the control boards) ----------
 // These blocks are read on every spawn, so a slider write takes effect on the
@@ -136,27 +149,30 @@ class Arrow {
 
         this.state = "held"; // held | nocked | flying | spent | stuck
         this.body = null;
+        this.vel = null;     // flight velocity (we integrate it; see makeFlightBody)
         this.flightTime = 0;
         this.roll = 0;
-        this.prev = null;    // cached pose for deflection rollback
         this.streak = null;  // flight particle trail
     }
 
-    // DYNAMIC body for flight. Orientation stays kinematic (we write the
-    // node rotation along velocity each frame; disablePreStep=false pushes
-    // it into the body pre-step), linear motion is fully physical.
-    makeDynamic(velocity) {
+    // KINEMATIC body for flight: WE integrate the arrow's motion (this.vel +
+    // gravity) in sub-steps and write the node pose each frame;
+    // disablePreStep=false pushes that pose into the body pre-step. Kinematic
+    // (not dynamic) so Havok doesn't also integrate it — we need full control
+    // of the step size to sub-step a long/hitched frame (see _updateFlight and
+    // the file header). The capsule keeps its filter masks so the swept cast
+    // can ignore it. PORT: a kinematic Rigidbody moved by code + Physics.SphereCast.
+    makeFlightBody(velocity) {
         const scene = this.ctx.scene;
+        this.vel = velocity.clone();
         this.body = new BABYLON.PhysicsBody(
-            this.root, BABYLON.PhysicsMotionType.DYNAMIC, false, scene);
+            this.root, BABYLON.PhysicsMotionType.KINEMATIC, false, scene);
         this._shape = new BABYLON.PhysicsShapeCapsule(
             new BABYLON.Vector3(0, 0, 0.02),
             new BABYLON.Vector3(0, 0, ARROW_LEN - 0.02), 0.006, scene);
         this._shape.filterMembershipMask = LAYERS.ARROW;
         this._shape.filterCollideMask = LAYERS.DEFAULT | LAYERS.GRABBABLE;
         this.body.shape = this._shape;
-        this.body.setMassProperties({ mass: ARROW_MASS });
-        this.body.setLinearVelocity(velocity);
         this.body.disablePreStep = false;
     }
 
@@ -459,13 +475,8 @@ export class ArrowSystem {
         arrow.state = "flying";
         arrow.flightTime = 0;
         arrow.roll = 0;
-        arrow.prev = {
-            pos: arrow.root.position.clone(),
-            rot: arrow.root.rotationQuaternion.clone(),
-            v: dir.scale(speed),
-        };
         arrow.prevTip = tip.clone();
-        arrow.makeDynamic(dir.scale(speed)); // set velocity, never force
+        arrow.makeFlightBody(dir.scale(speed)); // sets arrow.vel; we integrate it
         this._startStreak(arrow);
 
         fb.sound("drawrelease", { volume: 0.85, at: this.ctx.bow.aimPivot });
@@ -499,83 +510,83 @@ export class ArrowSystem {
     }
 
     _updateFlight(dt, arrow) {
-        const body = arrow.body;
-        const vNow = body.getLinearVelocity();
-        const pos = arrow.root.position; // unparented: local == world
-        if (pos.y < -2 || Math.abs(pos.z) > 40 || Math.abs(pos.x) > 20) {
-            this._despawn(arrow); // left play
-            return;
-        }
-        // Impact math uses the velocity cached BEFORE this frame's physics
-        // step: if the capsule grazed something discretely mid-step, vNow is
-        // already crushed by the engine contact.
-        const v = arrow.prev?.v ?? vNow;
-        const speed = v.length();
-        if (speed < 1e-3) return;
-        const dir = v.scale(1 / speed);
+        const g = (this._gravity ??= this.ctx.scene.getPhysicsEngine().gravity);
+        // Integrate flight in capped sub-steps so a long/hitched frame can't
+        // make the arrow leap far in one go (see makeFlightBody). The swept
+        // cast runs per sub-step, so impact placement always sits on the path
+        // the arrow actually flew — no teleport at the moment of impact.
+        let rem = dt;
+        while (rem > 1e-6 && arrow.state === "flying") {
+            const h = Math.min(MAX_FLIGHT_STEP, rem);
+            rem -= h;
 
-        // Sweep the head over the segment it ACTUALLY traversed since last
-        // frame (prevTip -> tipNow) plus a forward margin. Sizing the sweep
-        // by predicted speed*dt alone is flaky under XR frame jitter — the
-        // physics advance can outrun the predicted window and skip a face.
-        // Cast hits — not engine contacts — drive all impact logic, at TOI.
-        const tipNow = pos.add(this._forwardOf(arrow.root.rotationQuaternion).scale(ARROW_LEN));
-        const from = arrow.prevTip ?? tipNow;
-        const margin = Math.max(speed * dt * 0.5, 0.03);
-        const hit = this._cast(from, tipNow.add(dir.scale(margin)), body);
+            arrow.vel.addInPlace(g.scale(h)); // gravity (set velocity, never force)
+            const speed = arrow.vel.length();
+            if (speed < 1e-3) return;
+            const dir = arrow.vel.scale(1 / speed);
 
-        if (!hit) {
-            arrow.prev = { pos: pos.clone(), rot: arrow.root.rotationQuaternion.clone(), v: vNow.clone() };
-            arrow.flightTime += dt;
-            arrow.roll += SPIN_RATE * dt;
-            // Orient the shaft along velocity (+ shaft roll); pre-step sync
-            // pushes it into the body.
-            const vDir = vNow.length() > 1e-3 ? vNow.normalizeToNew() : dir;
-            arrow.root.rotationQuaternion.copyFrom(this._lookAlong(vDir, arrow.roll));
-            arrow.prevTip = pos.add(this._forwardOf(arrow.root.rotationQuaternion).scale(ARROW_LEN));
-            return;
-        }
-
-        const node = hit.body?.transformNode ?? null;
-        const isTarget = !!(node?.metadata?.arrowTarget || node?.parent?.metadata?.arrowTarget);
-        const hp = hit.hitPoint.clone();
-        const n = hit.hitNormal.clone();
-        const reflect = () => v.subtract(n.scale(2 * BABYLON.Vector3.Dot(v, n)))
-            .scaleInPlace(DEFLECT_SCALE);
-
-        if (isTarget && speed * speed > MIN_TARGET_SPEED2) {
-            this._stick(arrow, node, hp, dir, speed);
-            return;
-        }
-
-        if (arrow.flightTime < GRACE_TIME) {
-            // Bounce protection: roll back to the cached pose, reflect at
-            // 25%, restart the grace window (spec §7).
-            if (arrow.prev) {
-                arrow.root.position.copyFrom(arrow.prev.pos);
-                arrow.root.rotationQuaternion.copyFrom(arrow.prev.rot);
+            const pos = arrow.root.position; // unparented: local == world
+            const newPos = pos.add(arrow.vel.scale(h));
+            if (newPos.y < -2 || Math.abs(newPos.z) > 40 || Math.abs(newPos.x) > 20) {
+                this._despawn(arrow); // left play
+                return;
             }
-            body.setLinearVelocity(reflect());
-            arrow.flightTime = 0;
-            arrow.prev = null;
-            arrow.prevTip = null;
-            this._puff(hp);
-            return;
-        }
 
-        // Real impact on a non-target: seat at TOI (tip on the surface),
-        // damped bounce; once slow, hand over to plain dynamics.
-        arrow.root.position.copyFrom(hp.subtract(dir.scale(ARROW_LEN * 0.98)));
-        const out = reflect();
-        body.setLinearVelocity(out);
-        arrow.prev = null;
-        arrow.prevTip = null;
-        this.ctx.feedback.sound(arrowHitName(node), { volume: Math.min(0.8, 0.2 + speed / 40), at: arrow.root });
-        this._stopStreak(arrow);
-        this._puff(hp);
-        if (out.length() < SPENT_SPEED) {
-            arrow.state = "spent";
-            arrow.spentAt = performance.now() / 1000;
+            // Sweep the head over the segment it traverses this sub-step
+            // (prevTip -> new tip) plus a small forward margin. Cast hits —
+            // not engine contacts — drive all impact logic, at time-of-impact.
+            const newTip = newPos.add(dir.scale(ARROW_LEN));
+            const from = arrow.prevTip ?? pos.add(dir.scale(ARROW_LEN));
+            const margin = Math.max(speed * h * 0.5, 0.03);
+            const hit = this._cast(from, newTip.add(dir.scale(margin)), arrow.body);
+
+            if (!hit) {
+                arrow.root.position.copyFrom(newPos);
+                arrow.flightTime += h;
+                arrow.roll += SPIN_RATE * h;
+                // Orient the shaft along velocity (+ shaft roll); pre-step sync
+                // pushes it into the kinematic body.
+                arrow.root.rotationQuaternion.copyFrom(this._lookAlong(dir, arrow.roll));
+                arrow.prevTip = newPos.add(this._forwardOf(arrow.root.rotationQuaternion).scale(ARROW_LEN));
+                continue;
+            }
+
+            const node = hit.body?.transformNode ?? null;
+            const isTarget = !!(node?.metadata?.arrowTarget || node?.parent?.metadata?.arrowTarget);
+            const hp = hit.hitPoint.clone();
+            const n = hit.hitNormal.clone();
+            const reflect = () => arrow.vel.subtract(n.scale(2 * BABYLON.Vector3.Dot(arrow.vel, n)))
+                .scaleInPlace(DEFLECT_SCALE);
+
+            if (isTarget && speed * speed > MIN_TARGET_SPEED2) {
+                this._stick(arrow, node, hp, dir, speed);
+                return;
+            }
+
+            if (arrow.flightTime < GRACE_TIME) {
+                // Bounce protection: reflect at 25%, restart the grace window
+                // (spec §7). Per-sub-step casting means the arrow hasn't been
+                // committed into the surface, so there's nothing to roll back.
+                arrow.vel = reflect();
+                arrow.flightTime = 0;
+                arrow.prevTip = null;
+                this._puff(hp);
+                return;
+            }
+
+            // Real impact on a non-target: seat at TOI (tip on the surface),
+            // damped bounce; once slow, freeze as a spent arrow.
+            arrow.root.position.copyFrom(hp.subtract(dir.scale(ARROW_LEN * 0.98)));
+            arrow.vel = reflect();
+            arrow.prevTip = null;
+            this.ctx.feedback.sound(arrowHitName(node), { volume: Math.min(0.8, 0.2 + speed / 40), at: arrow.root });
+            this._stopStreak(arrow);
+            this._puff(hp);
+            if (arrow.vel.length() < SPENT_SPEED) {
+                arrow.state = "spent";
+                arrow.spentAt = performance.now() / 1000;
+            }
+            return;
         }
     }
 

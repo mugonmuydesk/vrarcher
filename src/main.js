@@ -360,6 +360,14 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
                     .then(() => { if (ctx.voiceBackend === "q32") ctx.voiceStatus = "q32: ready (webgpu)"; })
                     .catch((e) => { if (ctx.voiceBackend === "q32") ctx.voiceStatus = /WebGPU/.test(e.message) ? "q32: no WebGPU here" : "q32: load failed"; console.warn("[main] q32 load:", e.message); });
                 ctx.voiceStatus = _gpu.kokoroGpuReady() ? "q32: ready (webgpu)" : "q32: loading…";
+            } else if (name === "none") {
+                // Tier-1 text-only: no speech. The reply text shows on the NPC
+                // head HUD (npchud.js) instead of being voiced. speak returns a
+                // 1-sample silence so any whole-clip fallback path stays safe;
+                // speakStream emits no chunks and resolves immediately.
+                ctx.voicechat.speak = async () => ({ samples: new Float32Array(1), sampleRate: 24000 });
+                ctx.voicechat.speakStream = async () => {};
+                ctx.voiceStatus = "text only";
             } else {
                 ctx.voicechat.speak = geminiSpeak;
                 ctx.voicechat.speakStream = geminiSpeakStream;
@@ -521,7 +529,35 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     if (_brainParam === "scripted") ctx.setBrainBackend("scripted");   // lazy
     else console.log("[main] brain backend:", ctx.brainBackend, "— cloud LLM");
 
-    // Voice-backend switch panel (WASM / q32 / Gemini), to the player's left-front.
+    // Voice TIER preset — composes the STT/brain/TTS switches into the three
+    // product tiers (docs/voice-tiers.md). ctx.voiceTier = current tier; the
+    // signboard panel reads/sets it. Tier 1 is the DEFAULT; ?tier=1|2|3 overrides,
+    // and an explicit per-axis param (?stt/?tts/?brain/?livestt) opts out of the
+    // preset and keeps that manual choice.
+    ctx.voiceTier = null;
+    ctx.setVoiceTier = async (tier) => {
+        ctx.voiceTier = tier;
+        if (tier === 1) {                 // all on-device · scripted FSM · text-only
+            await ctx.setSttBackend("vosk");
+            await ctx.setBrainBackend("scripted");
+            await ctx.setVoiceBackend("none");
+        } else if (tier === 2) {          // hybrid · cheap LLM · on-device Kokoro voice
+            await ctx.setSttBackend("vosk");
+            await ctx.setBrainBackend("gemini");
+            await ctx.setVoiceBackend("wasm");
+        } else {                          // tier 3: all-cloud · frontier LLM · premium voice
+            await ctx.setSttBackend("gemini-live");
+            await ctx.setBrainBackend("gemini");
+            await ctx.setVoiceBackend("gemini");
+        }
+        console.log("[main] voice tier:", tier);
+    };
+    const _tierParam = parseInt(new URLSearchParams(location.search).get("tier"), 10);
+    const _anyAxisOverride = !!(_ttsParam || _sttParam || _brainParam || _wantLive);
+    if ([1, 2, 3].includes(_tierParam)) await ctx.setVoiceTier(_tierParam);
+    else if (!_anyAxisOverride) await ctx.setVoiceTier(1);   // DEFAULT: Tier 1 (on-device, free)
+
+    // Companion-tier switch panel (Tier 1 / 2 / 3), to the player's left-front.
     ctx.voicePanel = new VoicePanel(ctx, { position: new BABYLON.Vector3(-0.7, 1.15, 0.5) });
 
     // Gaze + proximity addressing — which companion/NPC the player is talking to

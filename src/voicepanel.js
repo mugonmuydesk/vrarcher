@@ -1,12 +1,13 @@
-// VoicePanel — a small standing signboard with two fingertip buttons that
-// switch the NPC voice (Wren) TTS backend live between cloud Gemini and
-// on-device Kokoro-82M. Press "Kokoro" or "Gemini" with a fingertip; the active
-// one is highlighted and the board shows the current load state.
+// VoicePanel — a small standing signboard with three fingertip buttons that
+// switch the companion-voice TIER live (docs/voice-tiers.md): Tier 1 (all
+// on-device, scripted, text-only), Tier 2 (hybrid, cheap LLM, Kokoro voice),
+// Tier 3 (all-cloud, frontier LLM, premium voice). Press a tier with a
+// fingertip; the active one is highlighted and the board shows the load state.
 //
-// Engine-clean boundary: this is pure Babylon UI. It calls ctx.setVoiceBackend()
-// and reads ctx.voiceBackend / ctx.voiceStatus (owned by main.js) — no TTS or
-// game logic here. PORT: in Unity this is a world-space canvas with two buttons
-// bound to the same backend-select call; the board text mirrors the same state.
+// Engine-clean boundary: this is pure Babylon UI. It calls ctx.setVoiceTier()
+// and reads ctx.voiceTier / ctx.voiceStatus (owned by main.js) — no STT/TTS or
+// game logic here. PORT: in Unity this is a world-space canvas with three buttons
+// bound to the same tier-select call; the board text mirrors the same state.
 
 import { FingertipButton } from "./buttons.js";
 
@@ -19,18 +20,18 @@ const PANEL = {
     btnZ: -0.04,                  // local z (toward the player, board front = -z)
 };
 
-// Backends shown, left → right. `name` is what we pass to setVoiceBackend.
-//   wasm   — on-device Kokoro, CPU worker, offline (default; smooth)
-//   q32    — on-device Kokoro, fp32 on WebGPU (fast, GPU; online/experimental)
-//   gemini — cloud
-const BACKENDS = [
-    { name: "wasm", title: "WASM", sub: "CPU" },
-    { name: "q32", title: "q32", sub: "GPU" },
-    { name: "gemini", title: "Gemini", sub: "cloud" },
+// Tiers shown, left → right. `tier` is what we pass to setVoiceTier.
+//   1 — all on-device, scripted FSM, text-only (default; free)
+//   2 — hybrid: cheap LLM + on-device Kokoro voice (modest sub)
+//   3 — all-cloud: frontier LLM + premium voice (premium sub)
+const TIERS = [
+    { tier: 1, title: "Tier 1", sub: "on-device" },
+    { tier: 2, title: "Tier 2", sub: "hybrid" },
+    { tier: 3, title: "Tier 3", sub: "cloud" },
 ];
 
 // Local x of button i, centred across the row.
-const xFor = (i) => (i - (BACKENDS.length - 1) / 2) * PANEL.btnSpacing;
+const xFor = (i) => (i - (TIERS.length - 1) / 2) * PANEL.btnSpacing;
 
 export class VoicePanel {
     constructor(ctx, { position }) {
@@ -94,15 +95,15 @@ export class VoicePanel {
         const btnRot = this.root.rotationQuaternion.multiply(tilt);
 
         this.buttons = {};
-        BACKENDS.forEach((b, i) => {
+        TIERS.forEach((b, i) => {
             const lx = xFor(i);
-            this.buttons[b.name] = new FingertipButton(ctx, {
-                name: `voiceBtn-${b.name}`,
+            this.buttons[b.tier] = new FingertipButton(ctx, {
+                name: `voiceBtn-tier${b.tier}`,
                 position: toWorld(lx, PANEL.btnY, PANEL.btnZ),
                 rotation: btnRot,
                 radius: PANEL.btnRadius,
                 onDown: () => {
-                    if (ctx.voiceBackend !== b.name) ctx.setVoiceBackend?.(b.name);
+                    if (ctx.voiceTier !== b.tier) ctx.setVoiceTier?.(b.tier);
                     ctx.feedback?.sound?.("click", { pitch: 1.0, volume: 0.5 });
                 },
             });
@@ -115,11 +116,11 @@ export class VoicePanel {
 
     // Repaint only when the rendered state changes; keep the active button lit.
     _tick() {
-        const key = `${this.ctx.voiceBackend}|${this.ctx.voiceStatus}`;
+        const key = `${this.ctx.voiceTier}|${this.ctx.voiceStatus}`;
         if (key !== this._lastKey) { this._lastKey = key; this._draw(); }
-        for (const b of BACKENDS) {
-            const active = this.ctx.voiceBackend === b.name;
-            const cap = this.buttons[b.name]?._capMat;
+        for (const b of TIERS) {
+            const active = this.ctx.voiceTier === b.tier;
+            const cap = this.buttons[b.tier]?._capMat;
             if (cap) cap.diffuseColor = active
                 ? new BABYLON.Color3(0.95, 0.78, 0.28)   // amber = active
                 : new BABYLON.Color3(0.2, 0.45, 0.55);   // teal = inactive
@@ -139,14 +140,14 @@ export class VoicePanel {
         g.textAlign = "center";
         g.fillStyle = "#cfe9a0";
         g.font = "bold 40px monospace";
-        g.fillText("NPC VOICE", TW / 2, vPix(this._H / 2 - 0.045));
+        g.fillText("COMPANION TIER", TW / 2, vPix(this._H / 2 - 0.045));
 
-        // Per-backend label, aligned above its button; active one boxed/amber.
+        // Per-tier label, aligned above its button; active one boxed/amber.
         g.font = "bold 38px sans-serif";
-        BACKENDS.forEach((b, i) => {
+        TIERS.forEach((b, i) => {
             const lx = xFor(i);
             const cx = xPix(lx);
-            const active = this.ctx.voiceBackend === b.name;
+            const active = this.ctx.voiceTier === b.tier;
             const yT = vPix(0.045), yS = vPix(0.005);
             if (active) {
                 g.fillStyle = "rgba(150,110,30,0.35)";

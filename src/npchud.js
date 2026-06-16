@@ -85,6 +85,10 @@ export class NpcHud {
         // heard — last transcript.
         const heard = vc?.lastText ?? "";
 
+        // reply — the companion's last reply (shown in Tier-1 text-only mode,
+        // since the front transcript panel is gone).
+        const reply = vc?.lastReply ?? "";
+
         // intent — last command classification from the scripted brain.
         //   lastCommand = { text, state, score, confident }; recognised via
         //   lastTurnRecognized. Confident → "STATE  score✓"; not → "—  score✗ (say again)".
@@ -121,7 +125,7 @@ export class NpcHud {
             if (nb.command != null) npcLine += `  cmd:${nb.command}`;
         }
 
-        return { state, heard, intent, vad: vadLine, turn, npc: npcLine };
+        return { state, heard, reply, intent, vad: vadLine, turn, npc: npcLine };
     }
 
     // --- panel (DynamicTexture plane, billboarded toward the player) ----------
@@ -172,6 +176,24 @@ export class NpcHud {
         g.font = "bold 52px sans-serif";
         g.fillText(this._clip(stateStr, 12), 24, 64);
 
+        let y = 116;
+
+        // Companion reply (Tier-1 text-only): the spoken-equivalent line, since
+        // the front transcript panel is gone. Amber, wrapped, max 2 lines.
+        if (this.ctx.voiceBackend === "none" && t.reply) {
+            const words = t.reply.split(/\s+/).filter(Boolean);
+            const wrapped = []; let cur = "";
+            for (const w of words) {
+                if ((cur + " " + w).trim().length > 30) { if (cur) wrapped.push(cur); cur = w; }
+                else cur = (cur + " " + w).trim();
+            }
+            if (cur) wrapped.push(cur);
+            g.font = "italic 26px sans-serif";
+            g.fillStyle = "#d8b46a";
+            for (const ln of wrapped.slice(0, 2)) { g.fillText("“" + ln + "”", 24, y); y += 32; }
+            y += 12;
+        }
+
         // Telemetry lines — monospace, label + value.
         const lines = [
             ["heard",  t.heard || "—"],
@@ -180,7 +202,6 @@ export class NpcHud {
             ["turn",   t.turn],
             ["npc",    t.npc],
         ];
-        let y = 116;
         g.font = "22px monospace";
         for (const [label, value] of lines) {
             g.fillStyle = "#6f8a99";
