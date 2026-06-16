@@ -53,11 +53,20 @@ export const TWOHAND_TUNING = {
     hoverExitUs: 500,
 };
 
+// Object-impact sound matrix. Each collidable mesh is tagged (in main.js /
+// scene.js) with metadata.soundMaterial {wood,metal,rock,sand} and dynamic
+// objects also metadata.soundSize {small,medium,big}. The impact clip is
+// drop_<striker material>_<striker size>_on_<surface material>.
+const SIZE_RANK = { small: 0, medium: 1, big: 2 };
+// The striker's material vocab includes "sand", but the surface vocab uses
+// "soil" — a sand body acting as the struck surface maps to soil.
+function toSurface(mat) { return mat === "sand" ? "soil" : (mat || "wood"); }
+
 function wireCollisionHaptics(ctx, body, it) {
     let last = 0;
     body.setCollisionCallbackEnabled(true);
     body.getCollisionObservable().add((ev) => {
-        if (!it.heldBy || ev.type !== "COLLISION_STARTED") return;
+        if (ev.type !== "COLLISION_STARTED") return;
         const now = performance.now() / 1000;
         if (now - last < COLLISION_HAPTIC.minInterval) return;
         const impulse = ev.impulse ?? 0;
@@ -65,9 +74,35 @@ function wireCollisionHaptics(ctx, body, it) {
         last = now;
         const t = Math.min(1, (impulse - COLLISION_HAPTIC.minImpulse)
             / (COLLISION_HAPTIC.maxImpulse - COLLISION_HAPTIC.minImpulse));
-        const amp = COLLISION_HAPTIC.minAmp + t * (COLLISION_HAPTIC.maxAmp - COLLISION_HAPTIC.minAmp);
-        for (const hand of it.holders) ctx.feedback.haptic(hand, amp, 0.02);
-        ctx.feedback.sound("impact", { volume: 0.2 + 0.4 * t });
+
+        // Haptics only while the item is held (a hand has to be on it to feel them).
+        if (it.heldBy) {
+            const amp = COLLISION_HAPTIC.minAmp + t * (COLLISION_HAPTIC.maxAmp - COLLISION_HAPTIC.minAmp);
+            for (const hand of it.holders) ctx.feedback.haptic(hand, amp, 0.02);
+        }
+
+        // Material-matched impact clip. This object is the striker; the thing it
+        // hit is the surface. When BOTH are dynamic tagged objects, only the
+        // smaller one plays (tie broken by name) so the clip sounds once — a
+        // static surface has no callback of its own, so against the world this
+        // object always plays.
+        const mine = it.mesh.metadata || {};
+        const myMat = mine.soundMaterial || "wood";
+        const mySize = mine.soundSize || "medium";
+        const otherNode = ev.collidedAgainst?.transformNode;
+        const other = otherNode?.metadata || {};
+        if (other.soundSize) {
+            const mineRank = SIZE_RANK[mySize] ?? 1;
+            const otherRank = SIZE_RANK[other.soundSize] ?? 1;
+            const iAmStriker = mineRank < otherRank
+                || (mineRank === otherRank && it.mesh.name < (otherNode.name || ""));
+            if (!iAmStriker) return;
+        }
+        // Only sound against a tagged object or surface — untagged geometry and
+        // hand/palm bodies stay silent rather than playing a default impact.
+        if (!other.soundSize && !other.soundMaterial) return;
+        const name = `drop_${myMat}_${mySize}_on_${toSurface(other.soundMaterial)}`;
+        ctx.feedback.sound(name, { volume: 0.25 + 0.55 * t, at: ev.point ?? it.mesh });
     });
 }
 
@@ -229,7 +264,7 @@ export function makeThrowable(ctx, mesh, opts = {}) {
             if (dist > 1e-4
                 && BABYLON.Vector3.Dot(v, toHand) / (speed * dist) < AUTO_CATCH.approachDot) continue;
             if (ctx.interaction.grab(hand, it, GrabType.GRIP)) {
-                ctx.feedback.sound("grab", { pitch: 1.3 });
+                ctx.feedback.sound("grab", { pitch: 1.3, at: it.mesh });
                 break;
             }
         }

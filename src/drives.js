@@ -190,7 +190,7 @@ export class CircularDrive {
                 if (this.mode === "physics") {
                     amp *= Math.min(1, Math.abs(this.omega) / 3);
                 }
-                this.ctx.feedback.detent(hand, amp, "crank", 0.015);
+                this.ctx.feedback.detent(hand, amp, "crank", 0.015, this.root);
             }
             this.onValue?.(this.value, this.angle);
         }
@@ -295,7 +295,7 @@ export class LinearDrive {
         if (this.value !== prev) {
             if (hand && Math.abs(this.value - this._lastDetent) >= LINEAR_TUNING.detentStep) {
                 this._lastDetent = this.value;
-                this.ctx.feedback.detent(hand, 0.3, "slider", 0.02);
+                this.ctx.feedback.detent(hand, 0.3, "slider", 0.02, this.knob);
             }
             this.onValue?.(this.value);
         }

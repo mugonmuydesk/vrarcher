@@ -135,7 +135,7 @@ export class Joystick {
             * JOYSTICK_TUNING.maxTilt * 180 / Math.PI;
         if (Math.abs(tiltDeg - this._lastTiltDeg) >= JOYSTICK_TUNING.tickDeg) {
             this._lastTiltDeg = tiltDeg;
-            this.ctx.feedback.detent(hand, JOYSTICK_TUNING.tickAmp, "joystick", 0.02);
+            this.ctx.feedback.detent(hand, JOYSTICK_TUNING.tickAmp, "joystick", 0.02, this.root);
         }
         this.onValue?.(this.axes.x, this.axes.z);
     }

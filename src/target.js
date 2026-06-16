@@ -123,7 +123,7 @@ export class Target {
         this.hits++;
         this.lastHit = { point: point.clone(), score };
         this._drawScore();
-        this.ctx.feedback.sound("score", { pitch: 0.8 + score * 0.06, volume: 0.5 });
+        this.ctx.feedback.sound("score", { pitch: 0.8 + score * 0.06, volume: 0.5, at: this.face });
         this.ctx.debug.set("score", `${this.score} (${this.hits} hits, last +${score} @${speed.toFixed(0)} m/s)`);
     }
 }

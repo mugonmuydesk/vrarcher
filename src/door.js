@@ -180,7 +180,7 @@ export class Door {
             a = Math.sign(a) * T.maxSwing;
             const hit = Math.abs(this.swingVel);
             this.swingVel = -this.swingVel * T.stopRestitution;
-            this.ctx.feedback.sound("impact", { pitch: 0.8, volume: Math.min(0.8, 0.25 + hit * 0.2) });
+            this.ctx.feedback.sound("doorSlam", { pitch: 0.8, volume: Math.min(0.8, 0.25 + hit * 0.2), at: this.root });
         }
         this.doorAngle = a;
         this.root.rotation.y = this._closedYaw + this.doorAngle;
@@ -222,7 +222,7 @@ export class Door {
             if (Math.abs(this.doorAngle - prev) > 1e-4) {
                 this._pushedThisFrame = true;
                 this._impartSwing(this.doorAngle - prev, dt);
-                this.ctx.feedback.detent(hand, 0.25, "doorPush", 0.06);
+                this.ctx.feedback.detent(hand, 0.25, "doorPush", 0.06, this.root);
             }
         }
     }
@@ -267,7 +267,7 @@ export class Door {
                 this.swingVel = 0;
                 this.root.rotation.y = this._closedYaw;
             }
-            this.ctx.feedback.sound("impact", { pitch: this.latched ? 0.7 : 1.0, volume });
+            this.ctx.feedback.sound("doorSlam", { pitch: this.latched ? 0.7 : 1.0, volume, at: this.root });
             if (this._held) this.ctx.feedback.haptic(this._held, 0.7, 0.03);
         }
         this.ctx.debug.set("door", `${this.latched ? "latched" : "free"} `
@@ -296,7 +296,7 @@ export class Door {
             const step = DOOR_TUNING.tickDeg * Math.PI / 180;
             if (this._detentAccum >= step) {
                 this._detentAccum = 0;
-                this.ctx.feedback.detent(hand, DOOR_TUNING.tickAmp, "doorHandle", 0.02);
+                this.ctx.feedback.detent(hand, DOOR_TUNING.tickAmp, "doorHandle", 0.02, this.root);
             }
         }
 

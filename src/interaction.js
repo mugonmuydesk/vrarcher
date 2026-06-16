@@ -222,7 +222,7 @@ export class InteractionSystem {
         if (interactable) {
             interactable.hoveredBy = hand;
             this.ctx.feedback.haptic(hand, HOVER_HAPTIC_AMPLITUDE, 0.01);
-            this.ctx.feedback.sound("hover", { volume: 0.2 });
+            this.ctx.feedback.sound("hover", { volume: 0.2, at: interactable.mesh });
             interactable.onHoverBegin?.(hand);
         }
     }
@@ -307,7 +307,7 @@ export class InteractionSystem {
         }
         if (interactable.holdPose && !curled) handCtl.setAuthoredPose(interactable.holdPose);
         this.ctx.feedback.haptic(hand, 0.6, 0.02);
-        this.ctx.feedback.sound("grab");
+        this.ctx.feedback.sound("grab", { at: interactable.mesh });
         interactable.onGrab?.(hand, { grabType });
         return true;
     }
@@ -338,7 +338,7 @@ export class InteractionSystem {
         handCtl.curlClamp = null;
         if (interactable.holdPose) handCtl.clearAuthoredPose();
         this.ctx.feedback.haptic(hand, 0.3, 0.015);
-        this.ctx.feedback.sound("release", { volume: 0.3 });
+        this.ctx.feedback.sound("release", { volume: 0.3, at: interactable.mesh });
         interactable.onRelease?.(hand, {
             grabType,
             linearVelocity: handCtl.releaseLinearVelocity,

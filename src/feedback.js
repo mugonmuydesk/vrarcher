@@ -9,18 +9,79 @@
 // Audio: procedural WebAudio one-shots for now (no assets needed); Phase 7
 // swaps in CC0 samples through the same sound() entry point. The
 // AudioContext unlocks on the XR-entry user gesture.
+//
+// POSITIONAL: every sound() can emit from a world position — pass `at` (a {x,y,z},
+// a Babylon Vector3, or a mesh/node). When given, the sound routes through the
+// shared SpatialAudio engine (spatial-audio.js: HRTF panner at `at`, listener at
+// the head) exactly like the NPC voice; without `at` it plays centred/head-relative
+// as before. The single AudioListener is written once per frame by main.js. This
+// is the same positional approach used for speech — see docs/spatial-audio.md.
+
+import { SpatialAudio } from "./spatial-audio.js";
 
 const US_FULL_SCALE = 1500; // µs pulse that maps to amplitude 1.0 (rifle fire)
 const MIN_HAPTIC_MS = 30;   // sub-~30ms pulses are imperceptible on Quest
 
 // CC0/recorded samples that override the procedural recipe of the same name.
 // Decoded lazily once the AudioContext exists; until then sound() falls back
-// to the procedural recipe.
-const SAMPLES = {
-    whoosh: "assets/sounds/arrow_whoosh.wav",       // arrow release
-    impact: "assets/sounds/arrow_hit_wood.wav",     // any impact
-    impactTarget: "assets/sounds/arrow_hit_wood.wav",
-};
+// to the procedural recipe. A value may be a single URL, or an ARRAY of URLs
+// (a "bank") — sound() then plays a random clip from the bank, avoiding the
+// one it played last so repeats don't stand out (creaks, draw-releases).
+const SND = "assets/sounds/";
+
+// Object-impact matrix: striker material+size struck onto a surface material.
+// One file per combination (drop_<mat>_<size>_on_<surface>.wav). The striker's
+// material vocab is {wood,metal,rock,sand}; the surface vocab is
+// {wood,rock,soil,metal} — a sand striker maps to a soil SURFACE (see
+// throwable.js toSurface()).
+const DROP_MATERIALS = ["wood", "metal", "rock", "sand"];
+const DROP_SIZES = ["small", "medium", "big"];
+const DROP_SURFACES = ["wood", "rock", "soil", "metal"];
+
+function buildSamples() {
+    const s = {
+        // --- archery ---
+        nock: SND + "arrow_nock.wav",
+        nockReady: SND + "nock_ready.wav",
+        whoosh: SND + "arrow_whoosh.wav",
+        arrowDraw: SND + "arrow_draw_from_quiver.wav",
+        strain: SND + "strain.wav",                       // full-draw hold
+        drawrelease: [                                    // the loose (bank)
+            SND + "drawrelease.wav",
+            SND + "drawrelease2.wav",
+            SND + "drawrelease3.wav",
+        ],
+        // --- arrow surface impacts (chosen by struck material in arrow.js) ---
+        arrow_hit_wood: SND + "arrow_hit_wood.wav",
+        arrow_hit_ground: SND + "arrow_hit_ground.wav",
+        arrow_hit_rock: SND + "arrow_hit_rock.wav",
+        arrow_hit_metal: SND + "arrow_hit_metal.wav",
+        arrow_hit_target: SND + "arrow_hit_target.wav",
+        // Legacy recipe names kept as generic fallbacks.
+        impact: SND + "arrow_hit_wood.wav",
+        impactTarget: SND + "arrow_hit_target.wav",
+        // --- UI / interaction ---
+        click: SND + "ui_click.wav",
+        tick: SND + "ui_tick.wav",
+        hover: SND + "ui_hover.wav",
+        grab: SND + "item_grab.wav",
+        release: SND + "item_release.wav",
+        score: SND + "score_ding.wav",
+        // --- door ---
+        doorSlam: SND + "door_slam.wav",
+        doorCreak: SND + "door_creak.wav",
+    };
+    // Bow-limb creaks: a 16-clip bank cycled while the string is drawn.
+    s.creak = [];
+    for (let i = 1; i <= 16; i++) s.creak.push(SND + "creak_" + String(i).padStart(2, "0") + ".wav");
+    // Object-impact matrix (48 clips, looked up by computed name).
+    for (const m of DROP_MATERIALS)
+        for (const z of DROP_SIZES)
+            for (const f of DROP_SURFACES)
+                s[`drop_${m}_${z}_on_${f}`] = `${SND}drop_${m}_${z}_on_${f}.wav`;
+    return s;
+}
+const SAMPLES = buildSamples();
 
 export class Feedback {
     constructor(ctx) {
@@ -28,7 +89,8 @@ export class Feedback {
         this._audio = null;
         this._lastTick = {}; // rate limiting per key
         this._counts = { left: 0, right: 0 }; // calls per hand (HUD diagnostics)
-        this._samples = {};      // name -> decoded AudioBuffer
+        this._samples = {};      // name -> decoded AudioBuffer (or array, for banks)
+        this._lastBank = {};     // bank name -> last buffer played (avoid repeats)
         this._samplesStarted = false;
     }
 
@@ -38,12 +100,20 @@ export class Feedback {
         if (this._samplesStarted) return;
         this._samplesStarted = true;
         const a = this.audio;
-        for (const [name, url] of Object.entries(SAMPLES)) {
-            fetch(url)
-                .then(r => r.arrayBuffer())
-                .then(buf => a.decodeAudioData(buf))
-                .then(decoded => { this._samples[name] = decoded; })
-                .catch(() => {}); // missing/undecodable -> stay on the recipe
+        const load = (url) => fetch(url).then(r => r.arrayBuffer()).then(buf => a.decodeAudioData(buf));
+        for (const [name, val] of Object.entries(SAMPLES)) {
+            if (Array.isArray(val)) {
+                // Bank: decode each clip into a slot; sound() picks among the
+                // ones that have arrived (the array fills in as they load).
+                this._samples[name] = [];
+                val.forEach((url, i) => load(url)
+                    .then(decoded => { this._samples[name][i] = decoded; })
+                    .catch(() => {}));
+            } else {
+                load(val)
+                    .then(decoded => { this._samples[name] = decoded; })
+                    .catch(() => {}); // missing/undecodable -> stay on the recipe
+            }
         }
     }
 
@@ -96,18 +166,41 @@ export class Feedback {
 
     // Short detent tick, rate-limited per key so analog scrubbing can call
     // it every frame change without saturating.
-    detent(hand, amplitude = 0.3, key = "detent", minInterval = 0.02) {
+    detent(hand, amplitude = 0.3, key = "detent", minInterval = 0.02, at = null) {
         const now = performance.now() / 1000;
         const k = `${hand}:${key}`;
         if (now - (this._lastTick[k] ?? 0) < minInterval) return;
         this._lastTick[k] = now;
         this.haptic(hand, amplitude, 0.005);
-        this.sound("tick", { pitch: 0.8 + amplitude * 0.6, volume: 0.15 + amplitude * 0.3 });
+        this.sound("tick", { pitch: 0.8 + amplitude * 0.6, volume: 0.15 + amplitude * 0.3, at });
     }
 
     get audio() {
         if (!this._audio) this._audio = new (window.AudioContext || window.webkitAudioContext)();
         return this._audio;
+    }
+
+    // True once the AudioContext exists — lets the per-frame listener updater skip
+    // creating the context before any sound has played (avoids a premature, gestured
+    // autoplay-policy warning).
+    get hasAudio() { return !!this._audio; }
+
+    // The shared 3D-audio engine (one AudioListener, HRTF panner factory, handedness)
+    // over the same AudioContext used for every sound. Lazily built; the NPC voice
+    // (voice-audio.js) wraps this same instance.
+    get spatial() {
+        if (!this._spatial) this._spatial = new SpatialAudio(this.audio);
+        return this._spatial;
+    }
+
+    // Resolve a sound's `at` into a plain {x,y,z}, accepting a Babylon mesh/node
+    // (getAbsolutePosition), a Vector3-like ({position} or bare {x,y,z}), or null.
+    _resolvePos(at) {
+        if (!at) return null;
+        if (typeof at.getAbsolutePosition === "function") { const p = at.getAbsolutePosition(); return { x: p.x, y: p.y, z: p.z }; }
+        if (at.position && typeof at.position.x === "number") return { x: at.position.x, y: at.position.y, z: at.position.z };
+        if (typeof at.x === "number") return { x: at.x, y: at.y, z: at.z };
+        return null;
     }
 
     // Shared 1 s white-noise buffer for the noise-based recipes.
@@ -125,28 +218,48 @@ export class Feedback {
     // One-shot sounds. Procedural recipes keyed by name; options
     // { volume 0–1, pitch multiplier }. CC0 samples can replace any recipe
     // later through this same entry point.
-    sound(name, { volume = 0.5, pitch = 1 } = {}) {
+    sound(name, { volume = 0.5, pitch = 1, at = null, category = "sfx" } = {}) {
         try {
             const a = this.audio;
             if (a.state === "suspended") a.resume();
             this._ensureSamples();
 
-            // Recorded sample overrides the recipe once decoded.
-            const sample = this._samples[name];
+            // Where the sound emits from: a positioned spatial node (HRTF panner at
+            // `at`, listener at the head) when `at` is given, else destination
+            // (centred). Same path for samples/clips and procedural recipes.
+            const pos = this._resolvePos(at);
+            const out = pos ? this.spatial.outputFor(pos, { category }) : a.destination;
+
+            // Recorded sample overrides the recipe once decoded. A bank (array)
+            // resolves to a random loaded clip, avoiding the last one played.
+            let sample = this._samples[name];
+            if (Array.isArray(sample)) {
+                const loaded = sample.filter(Boolean);
+                if (loaded.length) {
+                    let pick = loaded[Math.floor(Math.random() * loaded.length)];
+                    if (loaded.length > 1 && pick === this._lastBank[name]) {
+                        pick = loaded[(loaded.indexOf(pick) + 1) % loaded.length];
+                    }
+                    this._lastBank[name] = pick;
+                    sample = pick;
+                } else {
+                    sample = null; // none decoded yet -> fall through to recipe
+                }
+            }
             if (sample) {
                 const src = a.createBufferSource();
                 src.buffer = sample;
                 src.playbackRate.value = pitch;
                 const g = a.createGain();
                 g.gain.value = Math.min(1, volume);
-                src.connect(g); g.connect(a.destination);
+                src.connect(g); g.connect(out);
                 src.start();
                 return;
             }
 
             const t0 = a.currentTime;
             const gain = a.createGain();
-            gain.connect(a.destination);
+            gain.connect(out);
 
             const recipes = {
                 tick: { type: "square", freq: 1800, decay: 0.015 },

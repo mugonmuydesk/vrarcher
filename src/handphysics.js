@@ -281,7 +281,7 @@ export class PhysicsHand {
         if (touching && this.displacement > p.min) {
             const t = Math.min(1, (this.displacement - p.min) / (p.max - p.min));
             const amp = p.ampMin + t * (p.ampMax - p.ampMin);
-            this.ctx.feedback.detent(this.hand, amp, "press", 0.05);
+            this.ctx.feedback.detent(this.hand, amp, "press", 0.05, this.palmNode);
         }
     }
 }

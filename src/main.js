@@ -54,6 +54,26 @@ await createScene(ctx); // sets ctx.scene, ctx.xr, ctx.ground
 
 ctx.debug = initDebug(ctx);
 ctx.feedback = new Feedback(ctx);
+// Central per-frame writer of the single Web Audio listener (the player's head),
+// shared by ALL positional sound — the NPC voice AND every `sound(name, { at })`.
+// One writer avoids two subsystems fighting over the lone AudioListener. Skips
+// until the AudioContext exists (first sound) and only while a camera is live.
+ctx.updatables.push(() => {
+    const fb = ctx.feedback;
+    if (!fb?.hasAudio) return;
+    const cam = ctx.scene?.activeCamera;
+    if (!cam) return;
+    const p = cam.globalPosition;
+    const f = cam.getDirection(BABYLON.Axis.Z);   // head forward (Babylon LH, +Z)
+    const u = cam.getDirection(BABYLON.Axis.Y);
+    const r = cam.getDirection(BABYLON.Axis.X);   // right axis (stereo fallback)
+    fb.spatial.setListener({
+        position: { x: p.x, y: p.y, z: p.z },
+        forward: { x: f.x, y: f.y, z: f.z },
+        up: { x: u.x, y: u.y, z: u.z },
+        right: { x: r.x, y: r.y, z: r.z },
+    });
+});
 await initPhysics(ctx);
 ctx.hands = new HandSystem(ctx);
 ctx.physicsHands = new PhysicsHandSystem(ctx);
@@ -73,6 +93,7 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     crate.position.set(5.45, 0.4, 0.55); // +5 X: non-archery props moved right
     crate.material = mat("crateMat", 0.5, 0.35, 0.2);
     new BABYLON.PhysicsAggregate(crate, BABYLON.PhysicsShapeType.BOX, { mass: 0 }, ctx.scene);
+    crate.metadata = Object.assign(crate.metadata || {}, { soundMaterial: "wood" });
 
     // Throwable ball resting on the crate (auto-catch enabled: throw it at
     // a free hand and it attaches).
@@ -83,12 +104,14 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
         shapeType: BABYLON.PhysicsShapeType.SPHERE, mass: 0.25,
         restitution: 0.5, holdPose: "Hold", autoCatch: true, forcePull: true,
     });
+    ball.metadata = Object.assign(ball.metadata || {}, { soundMaterial: "metal", soundSize: "small" });
 
     // Heavy crate on the floor to the right: force-dragged, never kinematic.
     const heavyBox = BABYLON.MeshBuilder.CreateBox("heavyBox", { size: 0.35 }, ctx.scene);
     heavyBox.position.set(6.0, 0.18, 0.5);
     heavyBox.material = mat("heavyBoxMat", 0.25, 0.25, 0.3);
     const heavyIt = makeHeavyThrowable(ctx, heavyBox, { mass: 8, holdPose: "Hold" });
+    heavyBox.metadata = Object.assign(heavyBox.metadata || {}, { soundMaterial: "metal", soundSize: "big" });
 
     // Two-handed beam on the floor to the left: spring-held by both hands.
     const beam = BABYLON.MeshBuilder.CreateBox("beam",
@@ -96,6 +119,7 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     beam.position.set(4.1, 0.07, 0.7);
     beam.material = mat("beamMat", 0.6, 0.5, 0.25);
     const beamIt = makeTwoHandedThrowable(ctx, beam, { mass: 4, holdPose: "Hold" });
+    beam.metadata = Object.assign(beam.metadata || {}, { soundMaterial: "wood", soundSize: "big" });
 
     // Throwable cube within arm's reach.
     const cube = BABYLON.MeshBuilder.CreateBox("grabCube", { size: 0.12 }, ctx.scene);
@@ -104,6 +128,7 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     makeThrowable(ctx, cube, {
         shapeType: BABYLON.PhysicsShapeType.BOX, mass: 0.2, holdPose: "Hold",
     });
+    cube.metadata = Object.assign(cube.metadata || {}, { soundMaterial: "wood", soundSize: "small" });
 
     // Ring target downrange (+Z): tagged stick surface + scoring +
     // scoreboard (Phase 7).
@@ -149,7 +174,7 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
             position: new BABYLON.Vector3(0.7, 0.9, 0.05),
             onDown: () => {
                 ctx.target.resetRound(); // new game: score back to 0
-                ctx.feedback.sound("score", { pitch: 1.2 });
+                ctx.feedback.sound("score", { pitch: 1.2, at: ctx.buttons.start.root });
             },
         }),
         fancy: new FingertipButton(ctx, {
@@ -157,7 +182,7 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
             position: new BABYLON.Vector3(0.7, 0.65, -0.025),
             // local +Y (press axis) -> world -Z, facing the player
             rotation: BABYLON.Quaternion.RotationAxis(BABYLON.Vector3.Right(), -Math.PI / 2),
-            onDown: () => ctx.feedback.sound("nockReady", { pitch: 1.5 }),
+            onDown: () => ctx.feedback.sound("nockReady", { pitch: 1.5, at: ctx.buttons.fancy.root }),
         }),
     };
 

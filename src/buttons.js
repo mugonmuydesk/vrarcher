@@ -125,7 +125,7 @@ export class HoverButton {
         // Detent ticks while the plunger moves (house rule).
         if (pressingHand && Math.abs(depth - this.depth) > 0.004) {
             this.ctx.feedback.detent(pressingHand, 0.2 + 0.3 * (depth / this.travel),
-                `hoverbtn`, 0.04);
+                `hoverbtn`, 0.04, this.root);
         }
         this.depth = depth;
         this._setPlunger(depth);
@@ -135,13 +135,13 @@ export class HoverButton {
             this.engaged = true;
             this._plungerMat.emissiveColor = new BABYLON.Color3(0.5, 0.15, 0.1);
             if (pressingHand) this.ctx.feedback.haptic(pressingHand, 0.8, 0.04);
-            this.ctx.feedback.sound("click", { pitch: 0.7, volume: 0.6 });
+            this.ctx.feedback.sound("click", { pitch: 0.7, volume: 0.6, at: this.root });
             this.onDown?.(pressingHand);
         } else if (this.engaged && frac < HOVER_BTN.releaseFrac) {
             this.engaged = false;
             this._plungerMat.emissiveColor = BABYLON.Color3.Black();
             if (pressingHand) this.ctx.feedback.haptic(pressingHand, 0.4, 0.02);
-            this.ctx.feedback.sound("click", { pitch: 1.1, volume: 0.4 });
+            this.ctx.feedback.sound("click", { pitch: 1.1, volume: 0.4, at: this.root });
             this.onUp?.(pressingHand);
         }
         if (this.engaged) this.onHeld?.(pressingHand);
@@ -232,7 +232,7 @@ export class FingertipButton {
         const step = Math.floor((depth / TIP_BTN.travel) * TIP_BTN.detents);
         if (hand && step !== this._lastDetent && depth > 0) {
             this.ctx.feedback.haptic(hand, 0.4 * (depth / TIP_BTN.travel) + 0.05, 0.008);
-            this.ctx.feedback.sound("tick", { pitch: 1.2 + 0.2 * step, volume: 0.15 });
+            this.ctx.feedback.sound("tick", { pitch: 1.2 + 0.2 * step, volume: 0.15, at: this.root });
         }
         this._lastDetent = depth > 0 ? step : -1;
 
@@ -243,12 +243,12 @@ export class FingertipButton {
         if (!this.pressed && frac >= 0.95) {
             this.pressed = true;
             if (hand) this.ctx.feedback.haptic(hand, TIP_BTN.downAmp, TIP_BTN.downDur);
-            this.ctx.feedback.sound("click", { pitch: 1.4, volume: 0.5 });
+            this.ctx.feedback.sound("click", { pitch: 1.4, volume: 0.5, at: this.root });
             this.onDown?.(hand);
         } else if (this.pressed && frac < 0.5) {
             this.pressed = false;
             if (hand) this.ctx.feedback.haptic(hand, TIP_BTN.upAmp, TIP_BTN.upDur);
-            this.ctx.feedback.sound("click", { pitch: 1.7, volume: 0.3 });
+            this.ctx.feedback.sound("click", { pitch: 1.7, volume: 0.3, at: this.root });
             this.onUp?.(hand);
         }
         if (this.pressed) this.onHeld?.(hand);

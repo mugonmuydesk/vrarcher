@@ -18,6 +18,7 @@ import { GeminiBrain, geminiSpeak, geminiSpeakStream, geminiTranscribe } from ".
 import { MicRecorder } from "./speech.js";
 import { FILLERS, splitFiller, fillerClip } from "./fillers.js";
 import { resampleLinear } from "./vad.js";
+import { SpatialVoice } from "./voice-audio.js";
 
 // Smart Turn v3 (turn.js audio EoU) is trained on 16 kHz mono — the warm mic runs
 // at hardware rate (~48 kHz). Keep this in sync with the model's input rate.
@@ -113,6 +114,7 @@ export class VoiceChat {
         this._recT = 0;          // record elapsed (for the safety auto-stop)
         this._turn = 0;          // turn counter — a tap during a turn invalidates it
         this._activeSrc = [];    // live TTS audio sources (stoppable on interrupt)
+        this._voice = null;      // SpatialVoice adapter (3D NPC voice), lazy on first play
         this._alpha = 0;
         this._hold = 0;
         this._fillerBank = null;   // AudioBuffer[] (baked filled-pause clips), lazy
@@ -589,7 +591,6 @@ export class VoiceChat {
         const a = this.ctx.feedback?.audio;
         if (!a) { await this._play(await this.speak(reply), turn); return; }
         if (a.state === "suspended") { try { await a.resume(); } catch { /* gesture pending */ } }
-        const pan = this._npcPan();
         const t0 = a.currentTime;
         let playhead = 0, started = false;
         // Audio-clock timing for barge-in truncation: _playAudioT0 is when the first
@@ -599,16 +600,14 @@ export class VoiceChat {
         this._playAudioT0 = null;
         this._playPlayhead = 0;
         // Queue one mono buffer right after the previous one (+chunkLeadSec lead on
-        // the first), advancing the playhead. Panned toward the attending NPC.
+        // the first), advancing the playhead. Positioned at the attending NPC.
         const schedule = (buf) => {
             const src = a.createBufferSource();
             src.buffer = buf;
-            let node = src;
-            if (pan !== null && a.createStereoPanner) {
-                const p = a.createStereoPanner(); p.pan.value = pan;
-                src.connect(p); node = p;
-            }
-            node.connect(a.destination);
+            // Route through the spatial-voice adapter (PannerNode at the NPC, listener
+            // at the head) — positioned/updated per chunk so a moving NPC tracks. Falls
+            // back to centred destination when no adapter/NPC. See voice-audio.js.
+            this._routeVoice(src);
             const startAt = Math.max(a.currentTime + VOICE_TUNING.chunkLeadSec, playhead);
             if (!started) { started = true; this._playStartedAt = performance.now(); this._playAudioT0 = startAt; }
             src.start(startAt);
@@ -711,29 +710,51 @@ export class VoiceChat {
         src.buffer = buf;
         const gain = a.createGain();
         gain.gain.value = 1;
-        let node = gain;
-        const pan = this._npcPan();
-        if (pan !== null && a.createStereoPanner) {
-            const p = a.createStereoPanner();
-            p.pan.value = pan;
-            gain.connect(p); node = p;
-        }
         if (turn !== this._turn) return;
-        src.connect(gain); node.connect(a.destination);
+        src.connect(gain);
+        // Route the tail through the spatial-voice adapter (3D PannerNode at the NPC,
+        // listener at the head), falling back to centred destination. See voice-audio.js.
+        this._routeVoice(gain);
         this._playStartedAt = performance.now(); // the moment sound actually begins
         this._activeSrc.push(src);               // stoppable on interrupt
         src.start();
         await new Promise((res) => { src.onended = res; });
     }
 
-    // Stereo pan (-1..1) toward the addressed NPC (gaze+proximity target), else
-    // the nearest "attending" NPC, else null.
-    _npcPan() {
+    // --- spatial NPC voice (voice-audio.js adapter) ------------------------
+
+    // Lazily build the SpatialVoice over the shared SpatialAudio engine once the
+    // AudioContext exists (it unlocks on the XR-entry gesture). The listener is
+    // written centrally (main.js) — the voice only supplies its emitter.
+    _ensureVoice() {
+        const fb = this.ctx.feedback;
+        if (!fb?.hasAudio) return null;
+        const sp = fb.spatial;
+        if (!this._voice || this._voice._sp !== sp) this._voice = new SpatialVoice(sp);
+        return this._voice;
+    }
+
+    // Connect a TTS source/tail node into the spatial-voice output (PannerNode at
+    // the addressed NPC), repositioning the emitter first. Falls back to centred
+    // destination when the engine or an NPC isn't available.
+    _routeVoice(node) {
+        const voice = this._ensureVoice();
+        if (!voice) { try { node.connect(this.ctx.feedback.audio.destination); } catch { /* no ctx */ } return; }
+        const npc = this._emitterNpc();
+        voice.attachTo(npc ? { position: npc.mover.position } : null);
+        voice.update();
+        node.connect(voice.output);
+    }
+
+    // The NPC the voice emits from: the addressed (gaze+proximity) target, else the
+    // nearest "attending" NPC, else null. (Lifted verbatim from the old _npcPan.)
+    _emitterNpc() {
         const npcs = this.ctx.npcs?.npcs;
-        const cam = this.ctx.scene?.activeCamera;
-        if (!npcs?.length || !cam) return null;
+        if (!npcs?.length) return null;
         let best = this.ctx.addressing?.target ?? null;
         if (!best) {
+            const cam = this.ctx.scene?.activeCamera;
+            if (!cam) return null;
             let bestD = Infinity;
             for (const n of npcs) {
                 if (n.brain?.state !== "attend") continue;
@@ -741,13 +762,7 @@ export class VoiceChat {
                 if (d < bestD) { bestD = d; best = n; }
             }
         }
-        if (!best) return null;
-        // Project the NPC onto the head's right axis → left/right pan.
-        const right = cam.getDirection(BABYLON.Axis.X);
-        const dx = best.mover.position.x - cam.globalPosition.x;
-        const dz = best.mover.position.z - cam.globalPosition.z;
-        const r = (dx * right.x + dz * right.z) / (Math.hypot(dx, dz) || 1);
-        return Math.max(-1, Math.min(1, r));
+        return best;
     }
 
     // --- per-frame: poll the A button + keep the panel in front of the head -
@@ -769,6 +784,16 @@ export class VoiceChat {
                 this._recT += dt;
                 if (this._recT * 1000 >= VOICE_TUNING.maxRecordMs) this._finishRecording();
             }
+        }
+
+        // Keep the spatial voice tracking the NPC while speech is audible — the
+        // per-chunk update covers gaps between chunks, this covers a long single clip
+        // and continuous NPC movement during a reply. (The listener tracks the head
+        // via the central updater in main.js.)
+        if (this._voice && this._activeSrc.length) {
+            const npc = this._emitterNpc();
+            this._voice.attachTo(npc ? { position: npc.mover.position } : null);
+            this._voice.update();
         }
 
         // Visibility: shown while busy, plus a hold-then-fade after going idle.

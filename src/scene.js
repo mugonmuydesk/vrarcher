@@ -119,6 +119,8 @@ function buildGround(scene) {
     mat.setTexture("grassTex", tex);
     mat.backFaceCulling = false;
     ground.material = mat;
+    // Sound surface: grass/soil — arrows → arrow_hit_ground, object drops → *_on_soil.
+    ground.metadata = Object.assign(ground.metadata || {}, { soundMaterial: "soil" });
     return ground;
 }
 

@@ -31,9 +31,27 @@ const NOCK_RELEASE = 0.3;         // release threshold (hysteresis)
 const MAX_DRAW = 0.5;             // m
 const MIN_DRAW = 0.05;            // m — minimum meaningful draw
 const DRAW_TICK_STEP = 0.01;      // m of pull per haptic detent
+const CREAK_EVERY = 10;           // 1 in N detents is a bigger pulse + a creak
+                                  // (~5 creaks across a full draw; pace tracks
+                                  // draw speed since detents are per-distance)
+const TICK_AMP_BASE = 0.05, TICK_AMP_SCALE = 0.10;  // small detent buzz
+const CREAK_AMP_BASE = 0.30, CREAK_AMP_SCALE = 0.40; // bigger creak buzz
 const STRAIN_MIN = 0.1;           // s, full-draw strain tick interval
 const STRAIN_MAX = 0.5;
 const HOLD_POSE = "Hold";         // authored clip blended by approach
+
+// Pick the arrow-impact clip from the struck surface's soundMaterial tag
+// (set on meshes in main.js / scene.js). Falls back to wood for untagged hits.
+function arrowHitName(node) {
+    const mat = node?.metadata?.soundMaterial ?? node?.parent?.metadata?.soundMaterial;
+    switch (mat) {
+        case "metal": return "arrow_hit_metal";
+        case "rock": return "arrow_hit_rock";
+        case "soil": case "sand": return "arrow_hit_ground";
+        case "wood": return "arrow_hit_wood";
+        default: return "arrow_hit_wood";
+    }
+}
 
 // --- fire + flight (Phase 6, spec §5–7) -----------------------------------
 const SPEED_MIN = 3;              // m/s at minimum draw
@@ -167,6 +185,7 @@ export class ArrowSystem {
         this._readyCued = false;
         this._lerpCued = false;
         this._lastTickPull = 0;
+        this._tickCount = 0;     // detents since draw start (every Nth creaks)
         this._strainTimer = 0;
         this._drawHand = null;   // cached: bow.drawHand is nulled before onReleased
 
@@ -360,6 +379,7 @@ export class ArrowSystem {
         this.held.root.rotationQuaternion.copyFromFloats(0, 0, 0, 1);
         this.pull = 0;
         this._lastTickPull = 0;
+        this._tickCount = 0;
         this._strainTimer = 0;
         bow.aimActive = true;
         this.ctx.interaction.lockHover(bow.drawHand);
@@ -370,7 +390,7 @@ export class ArrowSystem {
         this._nockPin = new HandPin(this.ctx, bow.drawHand, bow.nock, {});
         this.ctx.handPins[bow.drawHand] = this._nockPin;
         hand.setAuthoredPoseTarget(HOLD_POSE, 1);
-        this.ctx.feedback.sound("nock");
+        this.ctx.feedback.sound("nock", { at: this.held.root });
         this.ctx.feedback.haptic(bow.drawHand, 0.5, 0.02);
     }
 
@@ -415,7 +435,7 @@ export class ArrowSystem {
         } else {
             // Under-pull (or Phase 5, no fire handler): back to the hand.
             this._cancelNock();
-            this.ctx.feedback.sound("release", { volume: 0.25 });
+            this.ctx.feedback.sound("release", { volume: 0.25, at: this.held?.root });
         }
     }
 
@@ -432,7 +452,7 @@ export class ArrowSystem {
         const tip = arrow.root.position.add(dir.scale(ARROW_LEN));
         if (this._cast(tip, tip.add(dir.scale(PRE_FIRE_GUARD)), null)) {
             this._despawn(arrow);
-            fb.sound("impact", { volume: 0.4, pitch: 0.7 });
+            fb.sound("impact", { volume: 0.4, pitch: 0.7, at: arrow.root });
             return;
         }
 
@@ -448,8 +468,8 @@ export class ArrowSystem {
         arrow.makeDynamic(dir.scale(speed)); // set velocity, never force
         this._startStreak(arrow);
 
-        fb.sound("fire", { volume: 0.7, pitch: 0.7 + 0.5 * t });
-        fb.sound("whoosh", { volume: 0.5, pitch: 0.8 + 0.6 * t });
+        fb.sound("drawrelease", { volume: 0.85, at: this.ctx.bow.aimPivot });
+        fb.sound("whoosh", { volume: 0.5, pitch: 0.8 + 0.6 * t, at: arrow.root });
         // Release cascade: bow hand 1500/800/500/300 µs at 50 ms; decaying
         // ramp on the draw hand.
         const bowHand = this.ctx.bow.bowHand;
@@ -550,7 +570,7 @@ export class ArrowSystem {
         body.setLinearVelocity(out);
         arrow.prev = null;
         arrow.prevTip = null;
-        this.ctx.feedback.sound("impact", { volume: Math.min(0.8, 0.2 + speed / 40) });
+        this.ctx.feedback.sound(arrowHitName(node), { volume: Math.min(0.8, 0.2 + speed / 40), at: arrow.root });
         this._stopStreak(arrow);
         this._puff(hp);
         if (out.length() < SPENT_SPEED) {
@@ -571,7 +591,7 @@ export class ArrowSystem {
         arrow.state = "stuck";
         this._stopStreak(arrow);
         this._puff(hp);
-        this.ctx.feedback.sound("impactTarget", { volume: 0.8 });
+        this.ctx.feedback.sound("arrow_hit_target", { volume: 0.8, at: arrow.root });
         node.metadata?.onArrowHit?.({ arrow, point: hp, speed });
         this.onTargetHit?.(node, { arrow, point: hp, speed });
     }
@@ -588,22 +608,32 @@ export class ArrowSystem {
         bow.setTension(pull / MAX_DRAW);
         bow.nock.position.z = bow.restZ - pull;
 
-        // Detent tick on both hands per 0.01 m of pull change.
+        // Detent on both hands per 0.01 m of pull change. Every CREAK_EVERY-th
+        // detent is a bigger pulse paired with a bow-limb creak; the rest are
+        // small silent buzzes. Detents are per-distance, so the creak cadence
+        // speeds up the faster you draw. Overlap is fine — each creak's audible
+        // part is front-loaded, the tail is decay.
         if (Math.abs(pull - this._lastTickPull) >= DRAW_TICK_STEP) {
             this._lastTickPull = pull;
-            const amp = 0.05 + (pull / MAX_DRAW) * 0.10;
-            fb.haptic(bow.bowHand, amp, 0.005);
-            fb.haptic(bow.drawHand, amp, 0.005);
-            fb.sound("click", { pitch: 0.8 + (pull / MAX_DRAW) * 0.8, volume: 0.25 });
+            this._tickCount++;
+            const tension = pull / MAX_DRAW;
+            const big = this._tickCount % CREAK_EVERY === 0;
+            const amp = big ? CREAK_AMP_BASE + tension * CREAK_AMP_SCALE
+                            : TICK_AMP_BASE + tension * TICK_AMP_SCALE;
+            fb.haptic(bow.bowHand, amp, big ? 0.02 : 0.005);
+            fb.haptic(bow.drawHand, amp, big ? 0.02 : 0.005);
+            if (big) fb.sound("creak", { volume: 0.4 + tension * 0.4, at: bow.aimPivot });
         }
 
-        // Full-draw strain ticks at random intervals.
+        // Full-draw strain ticks at random intervals: a buzz on both hands and
+        // a creak-strain clip from the bow.
         if (pull >= MAX_DRAW - 1e-3) {
             this._strainTimer -= dt;
             if (this._strainTimer <= 0) {
                 this._strainTimer = STRAIN_MIN + Math.random() * (STRAIN_MAX - STRAIN_MIN);
                 fb.haptic(bow.bowHand, 0.5, 0.01);
                 fb.haptic(bow.drawHand, 0.5, 0.01);
+                fb.sound("strain", { volume: 0.5, at: bow.aimPivot });
             }
         } else {
             this._strainTimer = 0;
@@ -666,7 +696,7 @@ export class ArrowSystem {
             // One-shot cues.
             if (dist < READY_DIST && !this._readyCued) {
                 this._readyCued = true;
-                this.ctx.feedback.sound("nockReady");
+                this.ctx.feedback.sound("nockReady", { at: this.held?.root });
             }
             if (dist >= APPROACH_DIST) { this._readyCued = false; this._lerpCued = false; }
             if (dist < LERP_DONE_DIST && !this._lerpCued) {
