@@ -66,6 +66,13 @@ function arrowHitName(node) {
 const SPEED_MIN = 3;              // m/s at minimum draw
 const SPEED_MAX = 30;             // m/s at full draw
 const SPIN_RATE = 10;             // rad/s shaft roll in flight
+const WEATHERVANE = 8;            // 1/m — how stiffly the shaft turns to follow
+                                  // velocity. The fletching aligns the arrow to the
+                                  // airflow, but with lag that scales with airspeed:
+                                  // per step t = 1−exp(−WEATHERVANE·speed·h). A fast
+                                  // arrow flies true; near the apex (low speed) it
+                                  // hangs and only noses over as it picks up speed,
+                                  // and it re-settles gradually after a bounce.
 const HEAD_RADIUS = 0.01;         // m — cast sphere (spec: 1 cm)
 const PRE_FIRE_GUARD = 0.8;       // m sphere-cast ahead at release
 const GRACE_TIME = 0.04;          // s — "first 2 frames" at the spec's 50 Hz
@@ -544,9 +551,16 @@ export class ArrowSystem {
                 arrow.root.position.copyFrom(newPos);
                 arrow.flightTime += h;
                 arrow.roll += SPIN_RATE * h;
-                // Orient the shaft along velocity (+ shaft roll); pre-step sync
-                // pushes it into the kinematic body.
-                arrow.root.rotationQuaternion.copyFrom(this._lookAlong(dir, arrow.roll));
+                // Weathervane the shaft toward the velocity heading with a lag that
+                // scales with airspeed — not an instant snap. So the arrow hangs near
+                // the apex (low airspeed) and noses over only as it speeds up falling,
+                // and re-settles gradually after a bounce. Roll is carried on both
+                // ends of the slerp, so it keeps spinning independent of the turn.
+                const target = this._lookAlong(dir, arrow.roll);
+                const curHeading = this._forwardOf(arrow.root.rotationQuaternion);
+                const t = 1 - Math.exp(-WEATHERVANE * speed * h);
+                arrow.root.rotationQuaternion.copyFrom(BABYLON.Quaternion.Slerp(
+                    this._lookAlong(curHeading, arrow.roll), target, t));
                 arrow.prevTip = newPos.add(this._forwardOf(arrow.root.rotationQuaternion).scale(ARROW_LEN));
                 continue;
             }
