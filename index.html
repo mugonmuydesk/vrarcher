@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Archer</title>
+    <script>
+        // Error-capture shim. Must run before anything else (including the
+        // IWE polyfill, which CATCHES exceptions from the XR frame callback
+        // and console.error()s them from its extension-script context —
+        // invisible to automation tooling that only reads page-domain
+        // messages, and fatal: its frame loop stops rescheduling).
+        //
+        // Captures: console.error/warn (wrapped), uncaught errors,
+        // unhandled rejections. Each entry lands in window.__errlog (poll
+        // it from automation) and is re-emitted as a page-domain
+        // console.log with an [errlog] prefix.
+        (function () {
+            const log = [];
+            window.__errlog = log;
+            const native = { error: console.error.bind(console), warn: console.warn.bind(console), log: console.log.bind(console) };
+            const push = (kind, args) => {
+                const msg = args.map(a => a instanceof Error ? (a.message + "\n" + a.stack) : String(a)).join(" ");
+                log.push({ t: new Date().toISOString(), kind, msg });
+                if (log.length > 100) log.shift();
+                native.log(`[errlog ${kind}]`, msg);
+            };
+            console.error = (...a) => { push("error", a); native.error(...a); };
+            console.warn = (...a) => { push("warn", a); native.warn(...a); };
+            window.addEventListener("error", e =>
+                push("uncaught", [e.message + " @ " + e.filename + ":" + e.lineno]));
+            window.addEventListener("unhandledrejection", e =>
+                push("rejection", [e.reason instanceof Error ? e.reason : String(e.reason)]));
+        })();
+    </script>
+    <script src="vendor/babylon-9.12.0.js"></script>
+    <script src="vendor/babylon.glTF2FileLoader-9.12.0.min.js"></script>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+        }
+        #debugHud {
+            position: fixed;
+            top: 8px;
+            left: 8px;
+            color: #9f9;
+            background: rgba(0, 0, 0, 0.55);
+            font: 12px/1.4 monospace;
+            padding: 6px 8px;
+            white-space: pre;
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="debugHud"></div>
+    <!-- Import map for the OPTIONAL "q32" voice backend only (Kokoro fp32 on
+         WebGPU via transformers.js v4 — the only runtime where Kokoro's WebGPU
+         output is correct). Loaded from CDN lazily, and ONLY if the player
+         selects q32 in the voice panel; the default WASM backend is fully
+         offline/vendored and never touches these. Bare specifiers here resolve
+         only for the kokoro-js wrapper's imports; the app's own modules use
+         relative paths and are unaffected. (path / fs/promises are Node-only
+         branches in the wrapper — stubbed empty for the browser.) -->
+    <script type="importmap">
+    {
+      "imports": {
+        "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/+esm",
+        "phonemizer": "https://cdn.jsdelivr.net/npm/phonemizer@1.2.1/+esm",
+        "path": "data:text/javascript,export default {};",
+        "fs/promises": "data:text/javascript,export default {};"
+      }
+    }
+    </script>
+    <script type="module" src="src/main.js"></script>
+</body>
+</html>
