@@ -41,7 +41,7 @@ const DROP_SURFACES = ["wood", "rock", "soil", "metal"];
 function buildSamples() {
     const s = {
         // --- archery ---
-        nock: SND + "arrow_nock.wav",
+        nock: SND + "nooked.wav",
         nockReady: SND + "nock_ready.wav",
         whoosh: SND + "arrow_whoosh.wav",
         arrowDraw: SND + "arrow_draw_from_quiver.wav",
@@ -56,7 +56,7 @@ function buildSamples() {
         arrow_hit_ground: SND + "arrow_hit_ground.wav",
         arrow_hit_rock: SND + "arrow_hit_rock.wav",
         arrow_hit_metal: SND + "arrow_hit_metal.wav",
-        arrow_hit_target: SND + "arrow_hit_target.wav",
+        arrow_hit_target: [SND + "target_thud1.wav", SND + "target_thud2.wav"],
         // Legacy recipe names kept as generic fallbacks.
         impact: SND + "arrow_hit_wood.wav",
         impactTarget: SND + "arrow_hit_target.wav",

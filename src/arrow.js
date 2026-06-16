@@ -390,7 +390,7 @@ export class ArrowSystem {
         this._nockPin = new HandPin(this.ctx, bow.drawHand, bow.nock, {});
         this.ctx.handPins[bow.drawHand] = this._nockPin;
         hand.setAuthoredPoseTarget(HOLD_POSE, 1);
-        this.ctx.feedback.sound("nock", { at: this.held.root });
+        this.ctx.feedback.sound("nock", { at: this.ctx.bow.nock });
         this.ctx.feedback.haptic(bow.drawHand, 0.5, 0.02);
     }
 
@@ -469,7 +469,7 @@ export class ArrowSystem {
         this._startStreak(arrow);
 
         fb.sound("drawrelease", { volume: 0.85, at: this.ctx.bow.aimPivot });
-        fb.sound("whoosh", { volume: 0.5, pitch: 0.8 + 0.6 * t, at: arrow.root });
+        fb.sound("whoosh", { volume: 0.5, pitch: 0.8 + 0.6 * t, at: tip });
         // Release cascade: bow hand 1500/800/500/300 µs at 50 ms; decaying
         // ramp on the draw hand.
         const bowHand = this.ctx.bow.bowHand;
@@ -591,7 +591,7 @@ export class ArrowSystem {
         arrow.state = "stuck";
         this._stopStreak(arrow);
         this._puff(hp);
-        this.ctx.feedback.sound("arrow_hit_target", { volume: 0.8, at: arrow.root });
+        this.ctx.feedback.sound("arrow_hit_target", { volume: 0.8, at: hp });
         node.metadata?.onArrowHit?.({ arrow, point: hp, speed });
         this.onTargetHit?.(node, { arrow, point: hp, speed });
     }
@@ -622,18 +622,17 @@ export class ArrowSystem {
                             : TICK_AMP_BASE + tension * TICK_AMP_SCALE;
             fb.haptic(bow.bowHand, amp, big ? 0.02 : 0.005);
             fb.haptic(bow.drawHand, amp, big ? 0.02 : 0.005);
-            if (big) fb.sound("creak", { volume: 0.4 + tension * 0.4, at: bow.aimPivot });
+            if (big) fb.sound("creak", { volume: 0.4 + tension * 0.4, at: bow.handle });
         }
 
-        // Full-draw strain ticks at random intervals: a buzz on both hands and
-        // a creak-strain clip from the bow.
+        // Full-draw strain ticks at random intervals: a buzz on both hands
+        // (no sound at full draw).
         if (pull >= MAX_DRAW - 1e-3) {
             this._strainTimer -= dt;
             if (this._strainTimer <= 0) {
                 this._strainTimer = STRAIN_MIN + Math.random() * (STRAIN_MAX - STRAIN_MIN);
                 fb.haptic(bow.bowHand, 0.5, 0.01);
                 fb.haptic(bow.drawHand, 0.5, 0.01);
-                fb.sound("strain", { volume: 0.5, at: bow.aimPivot });
             }
         } else {
             this._strainTimer = 0;
@@ -693,10 +692,9 @@ export class ArrowSystem {
             // Nock finger pose follows the approach factor.
             hand.setAuthoredPoseTarget(HOLD_POSE, approach);
 
-            // One-shot cues.
+            // One-shot cues (no sound at nock-ready).
             if (dist < READY_DIST && !this._readyCued) {
                 this._readyCued = true;
-                this.ctx.feedback.sound("nockReady", { at: this.held?.root });
             }
             if (dist >= APPROACH_DIST) { this._readyCued = false; this._lerpCued = false; }
             if (dist < LERP_DONE_DIST && !this._lerpCued) {
