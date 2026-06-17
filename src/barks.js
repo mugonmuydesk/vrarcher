@@ -27,6 +27,7 @@
 // Web Audio scheduling + pan) is re-authored against the native audio API.
 
 import { BARKS, barkClip } from "./fillers.js";
+import { SpatialVoice } from "./voice-audio.js";
 
 // Tuning — the cooldowns that keep barks from spamming or stepping on each
 // other. Module-top so the native port re-tunes here. Values are starting
@@ -125,7 +126,11 @@ export class BarkController {
 // controller above engine-clean; this half is re-authored for the native port.
 
 // Lazily fetch + decode the 12 baked bark clips into AudioBuffers (mirrors
-// VoiceChat._ensureFillerBank), then play one panned toward the companion. The
+// VoiceChat._ensureFillerBank), then play one EMBODIED at the companion: through
+// the shared SpatialAudio engine (HRTF PannerNode at the NPC, listener at the
+// head) via the same SpatialVoice adapter her spoken lines use, so a bark is
+// co-located with her voice rather than a flat stereo clip on the master bus.
+// (Falls back to a stereo pan only when the engine isn't HRTF-capable.) The
 // AudioContext is unlocked on the XR-entry gesture; before that, play() is a
 // near-silent no-op (it tries to resume, then plays muted at most).
 export class BarkAudio {
@@ -133,6 +138,7 @@ export class BarkAudio {
         this.ctx = ctx;
         this._bank = null;     // AudioBuffer[] (baked bark clips), lazy
         this._bankP = null;    // in-flight load (shared by concurrent callers)
+        this._voice = null;    // SpatialVoice over the shared engine (HRTF panner at the NPC), lazy
         this._lastSrc = null;  // the most recent scheduled source (demo assert)
         // Warm the bank in the background so the first bark is snappy.
         this._ensureBank();
@@ -158,18 +164,36 @@ export class BarkAudio {
         return this._bankP;
     }
 
-    // Play bark `index`, panned (-1..1) toward the companion. Returns the
-    // AudioBufferSourceNode that was started (or null if it couldn't play — no
-    // context, missing clip). Pan defaults to the live companion direction.
-    async play(index, pan = this._npcPan()) {
+    // Play bark `index`, EMBODIED at the companion. Returns the source started
+    // (or null if it couldn't play — no context, missing clip).
+    async play(index) {
         const a = this.ctx.feedback?.audio;
         if (!a) return null;
         if (a.state === "suspended") { try { await a.resume(); } catch { /* gesture pending */ } }
         const buf = (await this._ensureBank())?.[index];
         if (!buf) return null;             // clip missing → silent
+
+        // Embodied path: emit the bark from the companion's world position through
+        // the SAME HRTF/distance chain as her spoken voice (SpatialVoice over the
+        // shared SpatialAudio engine), so "Nice shot!" comes from HER, co-located
+        // with her speech — not a flat stereo clip on the master bus.
+        const sp = this.ctx.feedback?.spatial;
+        const npc = this._pickNpc();
+        if (sp && npc) {
+            if (!this._voice || this._voice._sp !== sp) this._voice = new SpatialVoice(sp);
+            this._voice.attachTo({ position: npc.mover.position }); // same anchor as VoiceChat
+            this._voice.update();                                   // place the panner at the NPC
+            const src = this._voice.playClip(buf);
+            this._lastSrc = src;
+            return src;
+        }
+
+        // Fallback (no NPC, or the spatial engine isn't HRTF-capable): flat stereo
+        // pan toward the companion, straight to master.
         const src = a.createBufferSource();
         src.buffer = buf;
         let node = src;
+        const pan = this._npcPan();
         if (pan !== null && a.createStereoPanner) {
             const p = a.createStereoPanner();
             p.pan.value = pan;
@@ -181,27 +205,39 @@ export class BarkAudio {
         return src;
     }
 
-    // Stereo pan toward the addressed companion (gaze+proximity target), else the
-    // nearest "attending" NPC, else null. Mirrors VoiceChat._npcPan.
-    // PORT: replace with the native spatial-audio source position; the choice of
-    // WHO to pan to (addressing target → nearest attending) is engine-clean.
-    _npcPan() {
+    // The NPC a bark emits from: the addressed (gaze+proximity) target, else the
+    // nearest "attending" NPC, else the nearest NPC of ANY state. Unlike
+    // VoiceChat._emitterNpc (which returns null when no NPC is addressed/attending,
+    // so conversational TTS centres), a REACTIVE bark must still come from the
+    // companion's body — "Nice shot!" fires while you're looking downrange at the
+    // target, not at her, so neither addressing nor "attend" will hold. With a
+    // single companion that means the bark always emits from her.
+    // PORT: WHO to emit from (addressing → attending → nearest) is engine-clean.
+    _pickNpc() {
         const npcs = this.ctx.npcs?.npcs;
+        if (!npcs?.length) return null;
+        const addressed = this.ctx.addressing?.target ?? null;
+        if (addressed) return addressed;
         const cam = this.ctx.scene?.activeCamera;
-        if (!npcs?.length || !cam) return null;
-        let best = this.ctx.addressing?.target ?? null;
-        if (!best) {
-            let bestD = Infinity;
-            for (const n of npcs) {
-                if (n.brain?.state !== "attend") continue;
-                const d = Math.hypot(n.mover.position.x - cam.globalPosition.x, n.mover.position.z - cam.globalPosition.z);
-                if (d < bestD) { bestD = d; best = n; }
-            }
+        if (!cam) return npcs[0];                 // no camera to range against — any body
+        let best = null, bestD = Infinity, nearest = null, nearestD = Infinity;
+        for (const n of npcs) {
+            const d = Math.hypot(n.mover.position.x - cam.globalPosition.x, n.mover.position.z - cam.globalPosition.z);
+            if (d < nearestD) { nearestD = d; nearest = n; }         // nearest of any state
+            if (n.brain?.state === "attend" && d < bestD) { bestD = d; best = n; } // prefer attending
         }
-        if (!best) return null;
+        return best ?? nearest;
+    }
+
+    // Stereo-pan fallback toward the picked NPC (used only when the HRTF spatial
+    // engine isn't available). Projects the companion direction onto camera-right.
+    _npcPan() {
+        const npc = this._pickNpc();
+        const cam = this.ctx.scene?.activeCamera;
+        if (!npc || !cam) return null;
         const right = cam.getDirection(BABYLON.Axis.X);
-        const dx = best.mover.position.x - cam.globalPosition.x;
-        const dz = best.mover.position.z - cam.globalPosition.z;
+        const dx = npc.mover.position.x - cam.globalPosition.x;
+        const dz = npc.mover.position.z - cam.globalPosition.z;
         const r = (dx * right.x + dz * right.z) / (Math.hypot(dx, dz) || 1);
         return Math.max(-1, Math.min(1, r));
     }
