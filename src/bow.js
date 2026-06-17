@@ -25,12 +25,12 @@ const BASE_BEND = 0.20;        // rad per segment at rest (bow curve)
 const FLEX_BEND = 0.18;        // extra rad per segment at full tension
 const HANDLE_LEN = 0.28;
 const AIM_BLEND_TIME = 0.15;   // s — nocked-aim blend in/out
-// Nocked aim (user-specified 2026-06-13): YAW (world Y) is always the bow
-// wrist's, nocked or not. Un-nocked the whole rotation follows the grip.
-// While nocked, the remaining axes conform to the draw hand: the bow
-// PITCHES so +Z matches the elevation of the nockOrigin→pivot line, and
-// the stave stays upright (zero roll). Lateral draw-hand offset is NOT
-// compensated — that would need yaw, which the wrist owns. Replaces the
+// Aim model: YAW+PITCH come from the aim direction — un-nocked that's the
+// bow hand's pointer (index/aim ray); nocked it's the draw hand → bow (pivot)
+// line, so the draw hand aims in both axes. ROLL (cant) is always the bow
+// wrist's: the stave follows the grip's up (thumb / +Z) axis, 1:1, in BOTH
+// states — rest applies it directly, nocked transfers the wrist's cant angle
+// onto the draw-defined flight axis (see _updateAim). Replaces the
 // reference's eye-line aim assist (HMD→nock pivot + draw offset).
 // Local pose of the bow root under the grip node (tuned in-emulator).
 // Grip-space axes (Babylon, from the IWE hand tables): fingers extend
@@ -229,6 +229,23 @@ export class Bow {
         return BABYLON.Quaternion.RotationQuaternionFromAxis(lx, ly, lz);
     }
 
+    // Component of v perpendicular to unit `axis`, normalized — or null if v is
+    // (near) parallel to axis.
+    _perp(v, axis) {
+        const p = v.subtract(axis.scale(BABYLON.Vector3.Dot(v, axis)));
+        return p.lengthSquared() > 1e-8 ? p.normalize() : null;
+    }
+
+    // Signed cant of `up` about unit `axis`, measured from world-vertical (rad).
+    _cantAngle(up, axis) {
+        const ref = this._perp(BABYLON.Vector3.Up(), axis);
+        const u = this._perp(up, axis);
+        if (!ref || !u) return 0;
+        return Math.atan2(
+            BABYLON.Vector3.Dot(BABYLON.Vector3.Cross(ref, u), axis),
+            BABYLON.Vector3.Dot(ref, u));
+    }
+
     // --- aim: rest = index-finger pointing; nocked = aim down the arrow ----
     // Un-nocked, the bow points where the bow hand's index finger / aim ray
     // points (so it never dangles at the ground). Nocked, the flight axis is
@@ -240,22 +257,32 @@ export class Bow {
         this._aimWeight = Math.min(1, Math.max(0,
             this._aimWeight + (active ? dt : -dt) / AIM_BLEND_TIME));
 
+        // Roll/cant is owned by the bow hand's wrist in BOTH states: its up
+        // reference is the grip +Z (stave-up / thumb axis). Using world-up here
+        // would peg the stave vertical and ignore wrist cant entirely.
+        const bowGrip = this.ctx.hands.hands[this.bowHand].gripNode;
+        const bowUp = BABYLON.Vector3.TransformNormal(
+            new BABYLON.Vector3(0, 0, 1), bowGrip.getWorldMatrix()).normalize();
+
         // Rest forward: the bow hand's pointer (index/aim) direction.
         const ctl = this.ctx.hands.hands[this.bowHand];
         const ptr = ctl.controller?.pointer ?? ctl.gripNode;
         const restFwd = ptr
             ? BABYLON.Vector3.TransformNormal(new BABYLON.Vector3(0, 0, 1), ptr.getWorldMatrix()).normalize()
             : new BABYLON.Vector3(0, 0, 1);
-        const restLocal = this._localOrient(restFwd, BABYLON.Vector3.Up());
+        const restLocal = this._localOrient(restFwd, bowUp);
 
         if (this._aimWeight <= 0) {
             this.aimPivot.rotationQuaternion.copyFrom(restLocal);
             return;
         }
 
-        // Nocked: forward = draw hand -> bow (pivot), so the draw hand sets
-        // yaw AND pitch. Roll reference = the bow hand's grip +Z (thumb /
-        // stave-up at the neutral pose), so cant follows the bow wrist.
+        // Nocked: forward (yaw+pitch) = draw hand -> bow (pivot). Roll/cant stays
+        // owned by the bow wrist, 1:1: take the wrist's cant (roll of the grip
+        // up-vector about the bow pointer, from vertical) and re-apply it about
+        // the draw-defined flight axis. Just projecting bowUp onto the flight
+        // plane loses gain when the wrist axis and flight axis disagree (measured
+        // ~0.72x); the angle transfer holds 1:1 regardless of draw geometry.
         // Falls back to rest if the geometry is degenerate.
         let aimLocal = restLocal;
         const from = (this.nockOrigin ?? this.ctx.hands.hands[this.drawHand].gripNode)
@@ -263,10 +290,12 @@ export class Bow {
         const forward = this.aimPivot.getAbsolutePosition().subtract(from);
         if (forward.lengthSquared() >= 1e-6) {
             forward.normalize();
-            const bowGrip = this.ctx.hands.hands[this.bowHand].gripNode;
-            const upRef = BABYLON.Vector3.TransformNormal(
-                new BABYLON.Vector3(0, 0, 1), bowGrip.getWorldMatrix()).normalize();
-            aimLocal = this._localOrient(forward, upRef);
+            const phi = this._cantAngle(bowUp, restFwd); // bow-wrist cant from vertical
+            const refDraw = this._perp(BABYLON.Vector3.Up(), forward);
+            const cantedUp = refDraw
+                ? refDraw.applyRotationQuaternion(BABYLON.Quaternion.RotationAxis(forward, phi))
+                : bowUp;
+            aimLocal = this._localOrient(forward, cantedUp);
         }
 
         BABYLON.Quaternion.SlerpToRef(restLocal, aimLocal, this._aimWeight,
