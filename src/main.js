@@ -21,10 +21,12 @@ import { geminiSpeak, geminiSpeakStream } from "./gemini.js";
 import { VoicePanel } from "./voicepanel.js";
 import { Addressing } from "./addressing.js";
 import { Barks } from "./barks.js";
-import { createVad } from "./vad.js";
 import { TurnDetector } from "./turn.js";
-import { createSmartTurnScorer } from "./smartturn.js";
-import { createTurnSenseScorer } from "./turnsense.js";
+// VAD + the turn-detector model scorers run in a Web Worker (voice-worker.js) so
+// their ORT/wasm inference never stalls the XR render loop — these are the off-main
+// drop-ins for createVad / createSmartTurnScorer / createTurnSenseScorer, each with
+// a main-thread fallback if the worker fails. See src/voiceworker.js.
+import { createVadProxy, loadWorkerAudioScorer, loadWorkerTextScorer } from "./voiceworker.js";
 import { SttStream } from "./stt-stream.js";
 import { Target } from "./target.js";
 import { HoverButton, FingertipButton } from "./buttons.js";
@@ -596,13 +598,14 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     //     partial transcript feeds the turn detector and the panel live.
     ctx.turn = new TurnDetector();          // gaze-leave + silence + heuristic text; Smart Turn injected once it loads
     // Smart Turn v3 (audio EoU) loads its ORT wasm + ~8.68 MB model + the vendored
-    // mel matrix asynchronously — mirror the createVad pattern: build it, and on
-    // resolve inject it into ctx.turn via setAudioScorer(). On any failure the load
-    // throws; we log and leave the heuristic-only turn path working unchanged.
-    createSmartTurnScorer()
+    // mel matrix asynchronously IN THE VOICE WORKER — build it, and on resolve inject
+    // the (worker-backed) scorer into ctx.turn via setAudioScorer(). On any failure
+    // loadWorkerAudioScorer falls back to the main-thread scorer (and that throws if
+    // it too can't load); we log and leave the heuristic-only turn path unchanged.
+    loadWorkerAudioScorer()
         .then((audioEouScore) => {
             ctx.turn.setAudioScorer(audioEouScore);
-            console.log("[main] Smart Turn v3 audio EoU armed");
+            console.log("[main] Smart Turn v3 audio EoU armed (worker)");
         })
         .catch((e) => console.warn("[main] Smart Turn unavailable; turn-end uses gaze+silence+heuristic:", e?.message || e));
     // TurnSense (text EoU) — the text complement to Smart Turn's acoustics. OFF by
@@ -614,24 +617,25 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
         (window.VR_USE_TURNSENSE === true ||
          (typeof location !== "undefined" && /[?&]turnsense=1\b/.test(location.search)));
     if (_useTurnSense) {
-        createTurnSenseScorer()
+        loadWorkerTextScorer()
             .then((textEouScore) => {
                 ctx.turn.setTextScorer(textEouScore);
-                console.log("[main] TurnSense text EoU armed (int8 ~176 MB)");
+                console.log("[main] TurnSense text EoU armed (worker, int8 ~176 MB)");
             })
             .catch((e) => console.warn("[main] TurnSense unavailable; turn-end uses audio+gaze+silence+heuristic:", e?.message || e));
     }
     ctx.stt = new SttStream();              // streaming-feel transcription over the warm mic
-    createVad({
+    createVadProxy({
         // TEN-VAD is the default: it recognizes the real (quiet) browser mic where
         // Silero v5 scored near-silence on the same audio (eval: TEN-VAD max 0.98 /
         // mean 0.60 vs Silero max ~0.12) and it's gain-robust (no normalization).
-        // If its wasm fails to load, createVad falls back to energy-RMS so the loop
-        // always has a VAD. backend:"silero" is still available for clean audio /
-        // the native port; backend:"rms" forces the loudness-only gate.
+        // The VAD model now runs in the voice worker (off the render thread); if its
+        // wasm fails to load there, the worker's createVad falls back to energy-RMS,
+        // and if the WORKER itself fails, createVadProxy falls back to a main-thread
+        // VAD — so the loop always has one. backend:"silero" is still available for
+        // clean audio / the native port; backend:"rms" forces the loudness-only gate.
         backend: "tenvad",
         // Gaze-leave (turn.js) reads ctx.addressing; VAD only needs the raw mic.
-        onFallback: (e) => console.warn("[main] VAD fell back to energy-RMS:", e?.message || e),
     }).then((vad) => {
         ctx.vad = vad;
         ctx.voicechat.attachHandsFree({ vad, turn: ctx.turn, stt: ctx.stt });

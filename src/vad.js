@@ -641,9 +641,12 @@ export async function createVad(opts = {}) {
         // Point ORT at the vendored, page-relative wasm so nothing is fetched
         // from a CDN at play time (works in the itch iframe). The lean non-jsep
         // wasm-only build avoids the broken jsep wasm.proxy (Kokoro memory note).
+        // proxy stays false: in production createVad runs inside the voice worker
+        // (voice-worker.js), so the calling thread is already off the render thread —
+        // we don't want a nested ORT proxy on top of our own worker.
         if (ort.env?.wasm) {
             ort.env.wasm.wasmPaths = abs(base); // absolute dir holding ort-wasm-simd-threaded.wasm
-            ort.env.wasm.proxy = false;      // run on the calling thread; no proxy worker
+            ort.env.wasm.proxy = false;      // no nested ORT proxy; we run in our own worker
         }
         const runModel = await buildOrtRunModel({ ort, modelUrl });
         // Smoke a single frame so a broken model/wasm fails HERE (→ fallback),

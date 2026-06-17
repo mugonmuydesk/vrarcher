@@ -293,12 +293,16 @@ export async function createSmartTurnScorer(opts = {}) {
     const melUrl = abs(opts.melUrl ?? T.melPath);
 
     // ORT — reuse the Silero VAD's vendored runtime. Point it at the vendored wasm
-    // (no CDN at play time) and disable the proxy worker (the lean non-jsep build's
-    // wasm.proxy is broken — Kokoro memory note).
+    // (no CDN at play time). proxy stays FALSE because (a) the lean non-jsep build's
+    // wasm.proxy is broken (Kokoro memory note) and (b) we don't NEED ORT's proxy:
+    // in production this factory runs inside the voice worker (voice-worker.js), so
+    // "the calling thread" is already that worker, OFF the render thread — same
+    // our-own-worker pattern Kokoro uses. (Node tests + the native port call it
+    // directly, where the calling thread is whatever invoked it.)
     const ORT = opts.ort || await import(/* @vite-ignore */ ortModuleUrl);
     if (ORT.env?.wasm) {
         ORT.env.wasm.wasmPaths = ortWasmDir;     // absolute dir w/ ort-wasm-simd-threaded.wasm
-        ORT.env.wasm.proxy = false;              // run on the calling thread
+        ORT.env.wasm.proxy = false;              // no nested ORT proxy; we run in our own worker
     }
     const session = await ORT.InferenceSession.create(modelUrl);
 

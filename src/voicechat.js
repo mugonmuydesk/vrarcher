@@ -50,7 +50,7 @@ export const VOICE_TUNING = {
     handsFreeMaxMs: 15000,  // ms — safety cap on a single hands-free capture (mirrors maxRecordMs)
     preRollSec: 2.0,        // s — continuous look-back buffer prepended to a capture on speech
                             //     onset, so the utterance start isn't clipped by VAD detection lag
-    micBlockSize: 4096,     // samples — ScriptProcessor block size for the warm hands-free mic
+    micBlockSize: 4096,     // samples — warm-mic capture block (AudioWorklet, ScriptProcessor fallback)
     chunkLeadSec: 0.05,     // s — lead added to the first streamed TTS chunk's start time so the
                             //     AudioContext clock has a moment to schedule before playback
 };
@@ -173,18 +173,39 @@ export class VoiceChat {
             const ac = new AC();
             try { await ac.resume(); } catch { /* gesture pending */ }
             const src = ac.createMediaStreamSource(stream);
-            // PORT: ScriptProcessor is deprecated; the native Quest capture path uses
-            // an AudioWorklet / native mic callback for the same per-block mono frames.
-            const proc = ac.createScriptProcessor(VOICE_TUNING.micBlockSize, 1, 1);
             const zero = ac.createGain(); zero.gain.value = 0; // silent sink (no echo)
-            proc.onaudioprocess = (e) => this._onMicFrame(e.inputBuffer.getChannelData(0), ac.sampleRate);
-            src.connect(proc); proc.connect(zero); zero.connect(ac.destination);
-            this._warmMic = { ac, stream, src, proc, zero };
+            const onFrame = (frame) => this._onMicFrame(frame, ac.sampleRate);
+            // PREFER an AudioWorklet: capture runs on the audio rendering thread, so it
+            // adds no main-thread work and can't glitch when the render loop is busy
+            // (the failure mode of the deprecated ScriptProcessor). Fall back to the
+            // ScriptProcessor if the worklet can't load (older browser / addModule
+            // failure) so capture always works.
+            let node = null, proc = null;
+            try {
+                if (!ac.audioWorklet) throw new Error("AudioWorklet unsupported");
+                await ac.audioWorklet.addModule(new URL("./mic-worklet.js", import.meta.url));
+                node = new AudioWorkletNode(ac, "mic-capture", {
+                    numberOfInputs: 1, numberOfOutputs: 1,
+                    channelCount: 1, channelCountMode: "explicit", // force mono downmix (matches the old 1-ch ScriptProcessor)
+                    processorOptions: { blockSize: VOICE_TUNING.micBlockSize },
+                });
+                node.port.onmessage = (e) => onFrame(e.data);
+                src.connect(node); node.connect(zero); zero.connect(ac.destination);
+            } catch (we) {
+                // PORT: ScriptProcessor is deprecated; the native Quest capture path uses
+                // an AudioWorklet / native mic callback for the same per-block mono frames.
+                console.warn("[voicechat] AudioWorklet unavailable; using ScriptProcessor mic:", we?.message || we);
+                node = null;
+                proc = ac.createScriptProcessor(VOICE_TUNING.micBlockSize, 1, 1);
+                proc.onaudioprocess = (e) => onFrame(e.inputBuffer.getChannelData(0));
+                src.connect(proc); proc.connect(zero); zero.connect(ac.destination);
+            }
+            this._warmMic = { ac, stream, src, node, proc, zero };
             this._micRate = ac.sampleRate;
             // Keep VAD's per-frame timing honest on 44.1 kHz hardware (vad.feed reads
             // inputRate every frame; default 48000 skews the hangover/onset math).
             if (this.vad) this.vad.inputRate = ac.sampleRate;
-            console.log("[voicechat] hands-free mic armed (VAD backend:", this.vad?.backend ?? "?", ")");
+            console.log("[voicechat] hands-free mic armed (" + (node ? "AudioWorklet" : "ScriptProcessor") + "; VAD backend:", this.vad?.backend ?? "?", ")");
         } catch (e) {
             // Mic init failed: don't leave a dead "error" state with no way to talk —
             // fall back to push-to-talk so the A-button / V-key path goes live.
@@ -671,14 +692,16 @@ export class VoiceChat {
 
     _toIdle() { this.state = "idle"; this._hold = VOICE_TUNING.holdAfter; this._render(); }
 
-    // Clean teardown of the warm hands-free mic: disconnect the ScriptProcessor,
-    // stop the MediaStream tracks, and close the capture AudioContext (distinct from
-    // ctx.feedback.audio — that one is shared and NOT closed here). Not called
-    // automatically, but exists so a host can tear the loop down cleanly.
+    // Clean teardown of the warm hands-free mic: disconnect the capture node
+    // (AudioWorklet or ScriptProcessor), stop the MediaStream tracks, and close the
+    // capture AudioContext (distinct from ctx.feedback.audio — that one is shared and
+    // NOT closed here). Not called automatically, but exists so a host can tear the
+    // loop down cleanly.
     dispose() {
         const m = this._warmMic;
         if (!m) return;
-        try { m.proc.disconnect(); } catch { /* already gone */ }
+        try { if (m.node) { m.node.port.onmessage = null; m.node.disconnect(); } } catch { /* already gone */ }
+        try { m.proc?.disconnect(); } catch { /* already gone */ }
         try { m.zero.disconnect(); } catch { /* already gone */ }
         try { m.src.disconnect(); } catch { /* already gone */ }
         try { for (const t of m.stream?.getTracks?.() || []) t.stop(); } catch { /* no tracks */ }
