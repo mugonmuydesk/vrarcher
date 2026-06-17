@@ -486,7 +486,16 @@ export class ArrowSystem {
         arrow.makeFlightBody(dir.scale(speed)); // sets arrow.vel; we integrate it
         this._startStreak(arrow);
 
-        fb.sound("drawrelease", { volume: 0.85, at: this.ctx.bow.aimPivot });
+        // Draw ladder: a deeper draw (more string tension) sounds a
+        // higher-pitched twang and a louder snap. `t` is the draw fraction
+        // (0..1); map it to the 8 pitch-sorted clips and scale loudness by
+        // stored energy (∝ draw, perceptually). See feedback.js drawrelease.
+        const DRAWRELEASE_CLIPS = 8;
+        fb.sound("drawrelease", {
+            index: Math.round(t * (DRAWRELEASE_CLIPS - 1)),
+            volume: 0.35 + 0.65 * t,
+            at: this.ctx.bow.aimPivot,
+        });
         fb.sound("whoosh", { volume: 0.5, pitch: 0.8 + 0.6 * t, at: tip });
         // Release cascade: bow hand 1500/800/500/300 µs at 50 ms; decaying
         // ramp on the draw hand.

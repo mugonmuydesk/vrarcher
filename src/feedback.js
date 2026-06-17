@@ -46,10 +46,22 @@ function buildSamples() {
         whoosh: SND + "arrow_whoosh.wav",
         arrowDraw: SND + "arrow_draw_from_quiver.wav",
         strain: SND + "strain.wav",                       // full-draw hold
-        drawrelease: [                                    // the loose (bank)
-            SND + "drawrelease.wav",
-            SND + "drawrelease2.wav",
-            SND + "drawrelease3.wav",
+        // The loose: 8 elastic-band twangs ordered by ascending pitch
+        // (97 Hz → 163 Hz). Played as a DRAW LADDER, not a random bank —
+        // sound() is called with an `index` derived from the draw fraction,
+        // so a deeper draw (higher string tension) sounds a higher-pitched
+        // twang (string frequency f ∝ √tension). See arrow.js release path.
+        // Each clip is trimmed so its attack transient is within ~2 ms of
+        // sample 0 → the snap is heard the instant the string releases.
+        drawrelease: [
+            SND + "drawrelease_0.wav",  // 97 Hz   (slackest draw)
+            SND + "drawrelease_1.wav",  // 97 Hz
+            SND + "drawrelease_2.wav",  // 127 Hz
+            SND + "drawrelease_3.wav",  // 130 Hz
+            SND + "drawrelease_4.wav",  // 133 Hz
+            SND + "drawrelease_5.wav",  // 137 Hz
+            SND + "drawrelease_6.wav",  // 153 Hz
+            SND + "drawrelease_7.wav",  // 163 Hz  (fullest draw)
         ],
         // --- arrow surface impacts (chosen by struck material in arrow.js) ---
         arrow_hit_wood: SND + "arrow_hit_wood.wav",
@@ -218,7 +230,7 @@ export class Feedback {
     // One-shot sounds. Procedural recipes keyed by name; options
     // { volume 0–1, pitch multiplier }. CC0 samples can replace any recipe
     // later through this same entry point.
-    sound(name, { volume = 0.5, pitch = 1, at = null, category = "sfx" } = {}) {
+    sound(name, { volume = 0.5, pitch = 1, at = null, category = "sfx", index = null } = {}) {
         try {
             const a = this.audio;
             if (a.state === "suspended") a.resume();
@@ -231,19 +243,27 @@ export class Feedback {
             const out = pos ? this.spatial.outputFor(pos, { category }) : a.destination;
 
             // Recorded sample overrides the recipe once decoded. A bank (array)
-            // resolves to a random loaded clip, avoiding the last one played.
+            // resolves to one clip: with `index` given, a DETERMINISTIC pick
+            // (clamped to the bank, nearest loaded clip as fallback) — used by
+            // the draw ladder so the same draw always sounds the same pitch;
+            // otherwise a random loaded clip, avoiding the last one played.
             let sample = this._samples[name];
             if (Array.isArray(sample)) {
-                const loaded = sample.filter(Boolean);
-                if (loaded.length) {
-                    let pick = loaded[Math.floor(Math.random() * loaded.length)];
-                    if (loaded.length > 1 && pick === this._lastBank[name]) {
-                        pick = loaded[(loaded.indexOf(pick) + 1) % loaded.length];
-                    }
-                    this._lastBank[name] = pick;
-                    sample = pick;
+                if (index != null) {
+                    const i = Math.max(0, Math.min(sample.length - 1, Math.round(index)));
+                    sample = sample[i] ?? sample.filter(Boolean)[0] ?? null;
                 } else {
-                    sample = null; // none decoded yet -> fall through to recipe
+                    const loaded = sample.filter(Boolean);
+                    if (loaded.length) {
+                        let pick = loaded[Math.floor(Math.random() * loaded.length)];
+                        if (loaded.length > 1 && pick === this._lastBank[name]) {
+                            pick = loaded[(loaded.indexOf(pick) + 1) % loaded.length];
+                        }
+                        this._lastBank[name] = pick;
+                        sample = pick;
+                    } else {
+                        sample = null; // none decoded yet -> fall through to recipe
+                    }
                 }
             }
             if (sample) {
