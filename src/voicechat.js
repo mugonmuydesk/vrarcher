@@ -18,6 +18,7 @@ import { GeminiBrain, geminiSpeak, geminiSpeakStream, geminiTranscribe } from ".
 import { MicRecorder } from "./speech.js";
 import { FILLERS, splitFiller, fillerClip } from "./fillers.js";
 import { resampleLinear } from "./vad.js";
+import { prof } from "./profiler.js";
 import { SpatialVoice } from "./voice-audio.js";
 
 // Smart Turn v3 (turn.js audio EoU) is trained on 16 kHz mono — the warm mic runs
@@ -174,7 +175,9 @@ export class VoiceChat {
             try { await ac.resume(); } catch { /* gesture pending */ }
             const src = ac.createMediaStreamSource(stream);
             const zero = ac.createGain(); zero.gain.value = 0; // silent sink (no echo)
-            const onFrame = (frame) => this._onMicFrame(frame, ac.sampleRate);
+            // Profiled: this is the per-block main-thread voice work (pre-roll + STT
+            // pushAudio incl. any resample + posting to the VAD worker).
+            const onFrame = (frame) => prof.timeSync("onMicFrame", () => this._onMicFrame(frame, ac.sampleRate));
             // PREFER an AudioWorklet: capture runs on the audio rendering thread, so it
             // adds no main-thread work and can't glitch when the render loop is busy
             // (the failure mode of the deprecated ScriptProcessor). Fall back to the
@@ -278,7 +281,9 @@ export class VoiceChat {
             let verdict = { complete: true, reason: "no-turn-detector" };
             if (this.turn) {
                 verdict = await this.turn.isTurnComplete({
-                    audio: this._utteranceAudio16k(), // Smart-Turn input, resampled to 16 kHz
+                    // Profiled: flatten + 16 kHz resample of the whole utterance runs
+                    // on main at end-of-turn (up to ~8 s of audio) — a hitch suspect.
+                    audio: prof.timeSync("uttResample", () => this._utteranceAudio16k()), // Smart-Turn input, resampled to 16 kHz
                     partialText: this._partialText,
                     gazeHeld,
                     utteranceMs: this._captureMs,

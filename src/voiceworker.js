@@ -21,6 +21,8 @@
 // PORT: native Quest replaces this whole shim with a direct call into a background
 // inference thread; the proxied contracts (feed/score) match the native seams.
 
+import { prof } from "./profiler.js";
+
 let _worker = null;            // the voice-worker.js instance
 let _seq = 0;                  // request id counter
 const _pending = new Map();    // id → { resolve, reject }
@@ -41,8 +43,8 @@ function _ensureWorker() {
             if (m.error) p.reject(new Error(m.error)); else p.resolve(m);
             return;
         }
-        if (m.type === "vadEvent") { _vadProxy && _vadProxy._onEvent(m.kind, m.ev, m.prob); return; }
-        if (m.type === "vadProb") { if (_vadProxy) _vadProxy.prob = m.prob; return; }
+        if (m.type === "vadEvent") { prof.count("vadEvent"); _vadProxy && _vadProxy._onEvent(m.kind, m.ev, m.prob); return; }
+        if (m.type === "vadProb") { prof.count("vadProb"); if (_vadProxy) _vadProxy.prob = m.prob; return; }
     };
     // A worker-level failure (module/script error) fires with no id → reject ALL
     // in-flight calls (so their callers fall back) and tear the worker down. Live

@@ -17,7 +17,8 @@ import { ControlBoard } from "./controlboard.js";
 import { ForcePull } from "./forcepull.js";
 import { NpcSystem } from "./npcsystem.js";
 import { VoiceChat } from "./voicechat.js";
-import { geminiSpeak, geminiSpeakStream } from "./gemini.js";
+import { geminiSpeak, geminiSpeakStream, GEMINI_BACKEND } from "./gemini.js";
+import { prof } from "./profiler.js";
 import { VoicePanel } from "./voicepanel.js";
 import { Addressing } from "./addressing.js";
 import { Barks } from "./barks.js";
@@ -326,6 +327,12 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     // panned toward an attending NPC). Brain/STT/TTS are engine-clean
     // (gemini.js / speech.js); this is just the WebXR adapter.
     ctx.voicechat = new VoiceChat(ctx);
+    // Frame-hitch profiler (always on): flags render frames slower than 20 fps and
+    // reports which voice ops ran + a state snapshot, POSTed to the proxy's /hitch
+    // so a `wrangler tail` can watch hitches live on the headset. ctx.profiler is
+    // also exposed for console poking (prof.* via the shared singleton).
+    ctx.profiler = prof;
+    prof.enable(ctx, { endpoint: GEMINI_BACKEND.proxyBase + "/hitch", hitchMs: 50 });
 
     // TTS backend, switchable live from the voice panel (voicepanel.js):
     //   "wasm"   — on-device Kokoro-82M, CPU Web Worker, fully offline (default;
@@ -733,6 +740,7 @@ ctx.locomotion = new Locomotion(ctx);
 applyLightmaps(ctx); // async; scene renders unlit-by-bake until PNGs land
 
 engine.runRenderLoop(() => {
+    prof.frame();   // measure the inter-frame period; flag + report <20fps hitches
     const dt = engine.getDeltaTime() / 1000;
     ctx.hands.update(dt);
     ctx.locomotion.update(dt);
