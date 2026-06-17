@@ -31,6 +31,24 @@ export const INTENT_TUNING = {
     // the utterance is treated as chatter (not a command) — the FSM stays put.
     // Validated sweet spot: 0.325 (0% false-accept on chatter, 4% false-reject).
     threshold: 0.325,
+    // Minimum top1-top2 cosine gap required to ACCEPT a SOCIAL match (not a
+    // movement command or ask). The conversational centroids sit close together
+    // (location vs whatnext, greet vs howareyou), so a confident-but-ambiguous
+    // social win is downgraded to chatter ("say again") unless it clears the
+    // best runner-up by this margin. Movement commands keep the plain threshold
+    // (a wrong social line is cheap; a wrong move physically relocates Wren).
+    // 0.06 sits under the observed held-out correct-social floor (~0.135) so it
+    // costs no real recognition, while downgrading genuine coin-flips (e.g. terse
+    // farewells brushing the location centroid) to in-character banter.
+    socialMargin: 0.06,
+    // Acceptance floor for SOCIAL matches — HIGHER than `threshold` (asymmetric
+    // confidence). Social categories are broad and chatter-adjacent ("the weather
+    // is lovely" brushes the greeting centroid ~0.39), so accepting them at the
+    // command threshold (0.325) lets real chatter trigger small-talk. A wrong move
+    // relocates Wren (costly) → commands keep 0.325; a missed greeting just falls
+    // to in-character banter (cheap) → social can afford the stricter floor.
+    // Tune in-headset alongside the other voice thresholds.
+    socialThreshold: 0.40,
     dim: 256,                  // potion-base-8M embedding dimension
     // The validated recipe did NOT lowercase the input (its lowercase detector
     // looked for "Lowercase" but the tokenizer.json says "lowercase") — so the
@@ -158,6 +176,11 @@ let _states = null;
 // ("state" vs "ask") — ask intents report from game state without an FSM move.
 let _askCentroids = null;
 let _askIntents = null;
+// SOCIAL centroids — a THIRD table for conversational small-talk (greet, thanks,
+// where-are-we, …) that, like asks, does NOT move the FSM; the brain answers
+// with a rotating scripted line. classify() labels these kind:"social".
+let _socialCentroids = null;
+let _socialIntents = null;
 
 // Build a { key: Float32Array(dim) } centroid table from a bank object
 // { key: [exampleUtterance, ...] }. Call after load().
@@ -198,15 +221,32 @@ export function buildAskCentroids(askBank) {
     return _askCentroids;
 }
 
-// classify(text) -> { state, score, confident, kind, intent }
-//   kind      : "ask" when the best centroid is an ask intent, else "state"
-//   intent    : the ask-intent key when kind==="ask", else null
+// Build the SOCIAL-intent centroids from a social bank { intent: [phrase, ...] }.
+// Optional — only needed if the caller wants conversational classification. Call
+// after load(). Recomputes each call.
+export function buildSocialCentroids(socialBank) {
+    if (!_EMB) throw new Error("intent.buildSocialCentroids() called before load()");
+    _socialIntents = Object.keys(socialBank);
+    _socialCentroids = _centroidsFor(socialBank);
+    return _socialCentroids;
+}
+
+// classify(text) -> { state, score, confident, kind, intent, margin }
+//   kind      : "ask" / "social" when the best centroid is an ask / social
+//               intent, else "state"
+//   intent    : the ask- OR social-intent key when kind!=="state", else null
 //   state     : best-matching MOVEMENT state (always the best STATE centroid,
-//               even when kind==="ask") — kept for back-compat callers
-//   score     : cosine similarity to the OVERALL best centroid (state or ask)
+//               even when kind!=="state") — kept for back-compat callers
+//   score     : cosine similarity to the OVERALL best centroid (any table)
 //   confident : score >= threshold (treat as a real command/query, not chatter)
-// One combined nearest-centroid pass over movement states AND ask intents
-// (when ask centroids are built). Requires load() + buildCentroids().
+//   margin    : score minus the SECOND-best centroid across ALL tables — how
+//               clearly the winner beat the runner-up. The brain uses this to
+//               reject ambiguous SOCIAL near-ties (location vs whatnext, …).
+// One combined nearest-centroid pass over movement states AND ask intents AND
+// social intents (each only if its centroids are built). Ties break by table
+// priority state > ask > social (a wrong move is costlier than a wrong line),
+// matching the original strict-greater-than ask/state precedence. Requires
+// load() + buildCentroids().
 export function classify(text) {
     if (!_centroids) throw new Error("intent.classify() called before buildCentroids()");
     const v = embed(text);
@@ -227,24 +267,46 @@ export function classify(text) {
         }
     }
 
-    // Combined winner across both tables.
-    const askWins = bestAsk !== null && askScore > stateScore;
-    const best = askWins ? askScore : stateScore;
+    // Best social intent (only if social centroids are built).
+    let bestSocial = null, socialScore = -2;
+    if (_socialCentroids) {
+        for (const k of _socialIntents) {
+            const s = cosine(v, _socialCentroids[k]);
+            if (s > socialScore) { socialScore = s; bestSocial = k; }
+        }
+    }
+
+    // Combined winner across all built tables. Strict > keeps the table priority
+    // state > ask > social on a tie (preserving the original ask/state rule).
+    let kind = "state", best = stateScore, intent = null;
+    if (bestAsk !== null && askScore > best) { kind = "ask"; best = askScore; intent = bestAsk; }
+    if (bestSocial !== null && socialScore > best) { kind = "social"; best = socialScore; intent = bestSocial; }
+
+    // Runner-up across ALL tables (for the margin). Collect every table's best,
+    // drop the winner, take the next highest — catches within-social near-ties.
+    const tops = [stateScore];
+    if (bestAsk !== null) tops.push(askScore);
+    if (bestSocial !== null) tops.push(socialScore);
+    tops.sort((a, b) => b - a);
+    const runnerUp = tops.length > 1 ? tops[1] : -2;
+
     return {
         state: bestState,
         score: best,
         confident: best >= INTENT_TUNING.threshold,
-        kind: askWins ? "ask" : "state",
-        intent: askWins ? bestAsk : null,
+        kind,
+        intent,
+        margin: best - runnerUp,
     };
 }
 
 // Convenience: ensure the model + centroids are ready in one call. Pass askBank
-// to also build the ask-intent centroids (combined classification).
-export async function init(bank, askBank = null) {
+// / socialBank to also build those intent centroids (combined classification).
+export async function init(bank, askBank = null, socialBank = null) {
     await load();
     buildCentroids(bank);
     if (askBank) buildAskCentroids(askBank);
+    if (socialBank) buildSocialCentroids(socialBank);
 }
 
 export function isReady() { return !!_centroids; }

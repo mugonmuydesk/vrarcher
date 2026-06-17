@@ -364,6 +364,13 @@ export class VoiceChat {
     async _finishHandsFree() {
         if (!this._capturing) return;
         this._capturing = false;
+        // STAGE-A receipt token: the player has FINISHED a turn (turn detector said
+        // so) but we haven't run STT-final + intent yet. Play a content-free "heard
+        // you, thinking" sound NOW to mask that gap. Gated to the text-only tier
+        // (no cloud TTS to collide with) — exactly where the companion is otherwise
+        // silent. Graceful-silent until the clips are baked. The Stage-B response
+        // clip is serialised behind it (acks.js chain), so no double-talk.
+        if (this.ctx.voiceBackend === "none") this.ctx.acks?.playReceipt();
         this._uttBuf = []; this._uttLen = 0;          // clear Smart-Turn buffer on turn-end
         const turn = ++this._turn;
         this.busy = true;

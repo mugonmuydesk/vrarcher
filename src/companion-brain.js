@@ -26,15 +26,25 @@
 //   .onQuery(fn)              subscribe; fn({ intent, gameState }) on a confident ask
 //   .lastQuery                { text, intent, score } of the last ask, or null
 //
+// It ALSO answers SOCIAL / small-talk intents (greet, thanks, "where are we?",
+// "how are you?", …) with a short scripted in-character line. Like asks, these do
+// NOT switch companionState (no movement) and report nothing from game state —
+// they're pure conversation, classified as a THIRD centroid table and gated by a
+// top1-top2 margin so ambiguous near-ties fall back to banter rather than misfire.
+//   .onSocial(fn)             subscribe; fn({ intent, score, line, index }) on a confident social intent
+//   .lastSocial               { text, intent, score } of the last small-talk, or null
+//
 // Engine-clean: NO Babylon, NO network. Pure functions + the local classifier.
 //
 // PORT: this FSM transcribes 1:1 to a native state machine; classify() is the
 // only seam, and it's a static-embedding lookup with a native equivalent.
 
 import * as intent from "./intent.js";
+import { INTENT_TUNING } from "./intent.js";
 import {
     COMMAND_BANK, ACK_LINES, FALLBACK_LINES, STATES,
     ASK_BANK, ASK_TEMPLATES, ASK_FALLBACK,
+    SOCIAL_BANK, SOCIAL_LINES, SOCIAL_INTENTS,
 } from "./command-bank.js";
 
 // --- Tuning (the port's re-tuning checklist) -------------------------------
@@ -48,6 +58,7 @@ export class CompanionBrain {
     constructor({
         bank = COMMAND_BANK, acks = ACK_LINES, fallbacks = FALLBACK_LINES,
         askBank = ASK_BANK, askTemplates = ASK_TEMPLATES, askFallback = ASK_FALLBACK,
+        socialBank = SOCIAL_BANK, socialLines = SOCIAL_LINES,
         gameState = null,   // optional () => ({ score, hits, arrows, ... }) provider
     } = {}) {
         this._bank = bank;
@@ -56,12 +67,15 @@ export class CompanionBrain {
         this._askBank = askBank;
         this._askTemplates = askTemplates;
         this._askFallback = askFallback;
+        this._socialBank = socialBank;
+        this._socialLines = socialLines;
         this._gameState = typeof gameState === "function" ? gameState : null;
 
         this.companionState = BRAIN_TUNING.defaultState;
         this.lastCommand = null;          // { text, state, score, confident }
         this.lastTurnRecognized = false;  // was the last respond() a command?
         this.lastQuery = null;            // { text, intent, score } of last ask
+        this.lastSocial = null;           // { text, intent, score } of last small-talk
 
         // GeminiBrain interface parity (unused by the scripted brain, but kept so
         // voicechat.js's barge-in/history bookkeeping never trips on undefined).
@@ -71,15 +85,18 @@ export class CompanionBrain {
         this._stateListeners = [];
         this._commandListeners = [];      // fire on EVERY confident command
         this._queryListeners = [];        // fire on EVERY confident ask intent
+        this._socialListeners = [];       // fire on EVERY confident social intent
         this._ackIdx = {};                // per-state rotation cursor
         for (const st of STATES) this._ackIdx[st] = 0;
+        this._socialIdx = {};             // per-social-intent rotation cursor
+        for (const k of SOCIAL_INTENTS) this._socialIdx[k] = 0;
         this._fallbackIdx = 0;
 
         // Kick off the lazy model load + centroid build. respond() awaits this,
         // so the first turn waits for the (one-time, ~30 MB) load; later turns are
         // instant (~0.004 ms classify). Failures are surfaced per-turn, not thrown
         // at construction (keeps the brain swap-in non-blocking).
-        this._ready = intent.init(this._bank, this._askBank).catch((e) => {
+        this._ready = intent.init(this._bank, this._askBank, this._socialBank).catch((e) => {
             console.warn("[companion-brain] intent model load failed:", e?.message || e);
             this._loadError = e;
         });
@@ -106,9 +123,9 @@ export class CompanionBrain {
         };
     }
 
-    _emitCommand(state, score) {
+    _emitCommand(state, score, ackIndex) {
         for (const fn of this._commandListeners) {
-            try { fn({ state, score }); }
+            try { fn({ state, score, ackIndex }); }
             catch (e) { console.warn("[companion-brain] onCommand listener threw:", e?.message || e); }
         }
     }
@@ -129,6 +146,36 @@ export class CompanionBrain {
             try { fn({ intent, score, gameState }); }
             catch (e) { console.warn("[companion-brain] onQuery listener threw:", e?.message || e); }
         }
+    }
+
+    // Subscribe to EVERY confident SOCIAL / small-talk intent (a scripted reply,
+    // NOT a movement command — companionState is untouched). fn({ intent, score,
+    // line, index }) where index identifies the prebaked clip
+    // (SOCIAL_LINES[intent][index]). Used by the prebaked-clip voice (acks.js).
+    // Returns an unsubscribe fn.
+    onSocial(fn) {
+        this._socialListeners.push(fn);
+        return () => {
+            const i = this._socialListeners.indexOf(fn);
+            if (i >= 0) this._socialListeners.splice(i, 1);
+        };
+    }
+
+    _emitSocial(intent, score, line, index) {
+        for (const fn of this._socialListeners) {
+            try { fn({ intent, score, line, index }); }
+            catch (e) { console.warn("[companion-brain] onSocial listener threw:", e?.message || e); }
+        }
+    }
+
+    // Pick a social reply line (rotated so it doesn't repeat). Returns { line,
+    // index } — the index identifies the prebaked clip (SOCIAL_LINES[intent][i]).
+    _social(intentKey) {
+        const lines = this._socialLines?.[intentKey] || [];
+        if (lines.length === 0) return { line: "Mm.", index: -1 };
+        const i = (this._socialIdx[intentKey] || 0) % lines.length;
+        this._socialIdx[intentKey] = (i + 1) % lines.length;
+        return { line: lines[i], index: i };
     }
 
     // Read the injected live game state, or a safe default if none is wired.
@@ -171,12 +218,14 @@ export class CompanionBrain {
         }
     }
 
+    // Pick an acknowledgement line (rotated). Returns { line, index } — index
+    // identifies the prebaked clip (ACK_LINES[state][i]); -1 when none defined.
     _ack(state) {
         const lines = this._acks[state] || [];
-        if (lines.length === 0) return "Understood.";
+        if (lines.length === 0) return { line: "Understood.", index: -1 };
         const i = this._ackIdx[state] % lines.length;
         this._ackIdx[state] = (i + 1) % lines.length;
-        return lines[i];
+        return { line: lines[i], index: i };
     }
 
     _fallback() {
@@ -201,7 +250,7 @@ export class CompanionBrain {
             return this._fallback();
         }
 
-        const { state, score, confident, kind, intent: askIntent } = intent.classify(text);
+        const { state, score, confident, kind, intent: matchIntent, margin } = intent.classify(text);
         this.lastCommand = { text, state, score, confident };
 
         if (!confident) {
@@ -215,7 +264,26 @@ export class CompanionBrain {
         // recognised movement command (lastTurnRecognized stays false).
         if (kind === "ask") {
             this.lastTurnRecognized = false;
-            return this._answerAsk(askIntent, score, text);
+            return this._answerAsk(matchIntent, score, text);
+        }
+
+        // Recognised SOCIAL / small-talk → a scripted in-character line. No FSM
+        // move, no game-state read. The conversational centroids sit close, so a
+        // confident-but-AMBIGUOUS win (small top1-top2 gap) is downgraded to the
+        // banter fallback rather than risk answering the wrong small-talk.
+        if (kind === "social") {
+            this.lastTurnRecognized = false;
+            // Two gates: a higher acceptance floor than commands (social is broad
+            // + chatter-adjacent) AND a top1-top2 margin (the social centroids sit
+            // close). Fail either → in-character banter, never a wrong small-talk.
+            if (score < INTENT_TUNING.socialThreshold || margin < INTENT_TUNING.socialMargin) {
+                this.lastSocial = null;
+                return this._fallback();
+            }
+            const { line, index } = this._social(matchIntent);
+            this.lastSocial = { text, intent: matchIntent, score };
+            this._emitSocial(matchIntent, score, line, index);
+            return line;
         }
 
         // Recognised command. Universal recall and stand-down are already encoded
@@ -229,11 +297,13 @@ export class CompanionBrain {
 
         this.lastTurnRecognized = true;
         this._setState(target, { command: text, score });
+        const { line, index } = this._ack(target);
         // Fire on EVERY confident command (even a re-issue of the current state)
         // so the movement layer re-asserts the order — _setState only fires on a
-        // CHANGE, which would swallow "follow me" while already FOLLOW.
-        this._emitCommand(target, score);
-        return this._ack(target);
+        // CHANGE, which would swallow "follow me" while already FOLLOW. The ack
+        // index identifies the prebaked clip for the voice (acks.js).
+        this._emitCommand(target, score, index);
+        return line;
     }
 
     reset() {
@@ -241,7 +311,9 @@ export class CompanionBrain {
         this.lastCommand = null;
         this.lastTurnRecognized = false;
         this.lastQuery = null;
+        this.lastSocial = null;
         for (const st of STATES) this._ackIdx[st] = 0;
+        for (const k of SOCIAL_INTENTS) this._socialIdx[k] = 0;
         this._fallbackIdx = 0;
         this._setState(BRAIN_TUNING.defaultState, { reason: "reset" });
     }

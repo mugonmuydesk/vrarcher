@@ -218,6 +218,88 @@ export const ASK_FALLBACK = {
     ASK_ARROWS: "Hard to say right now.",
 };
 
+// --- SOCIAL / conversational intents ---------------------------------------
+// Small-talk the companion ANSWERS in character but that — like ASK intents —
+// does NOT switch companionState (no movement). Classified by the SAME
+// nearest-centroid pass as the movement states and ask intents (src/intent.js),
+// as a THIRD centroid table; a confident match routes to a rotating SOCIAL_LINES
+// reply instead of an FSM transition or a game-state report.
+//
+// These centroids share embedding space with the movement states and asks, so a
+// few pairs sit close together — the seed phrases below are chosen to pull them
+// apart, and intent.js returns a top1-top2 MARGIN the brain uses to reject the
+// near-ties (see INTENT_TUNING.socialMargin). Known confusions handled here:
+//   • SOCIAL_LOCATION ("where are we") vs SOCIAL_WHATNEXT ("where to now") —
+//     both say "where"; location is seeded on PLACE, whatnext on PLAN/ACTION.
+//   • SOCIAL_GREET vs SOCIAL_HOWAREYOU — the bundled "hey, how are you" form is
+//     seeded under HOWAREYOU so it wins the bundle (its reply greets too).
+//   • SOCIAL_THANKS vs SOCIAL_PRAISE — thanking-act vs a judgement of Wren.
+//   • SOCIAL_PRAISE vs SOCIAL_CRITICISM — opposite polarity. WEAKNESS: the
+//     static embedding is bag-of-words-ish, so it reads polarity from the WORDS
+//     ("brilliant" vs "useless") and BREAKS on negation/sarcasm ("you're NOT
+//     useless", "oh, GREAT job"). Seeded on unambiguous phrasings; accept the
+//     misfire. Do not "fix" with negated seeds without re-validating.
+//
+// Add MORE / MORE-VARIED phrasings to widen recognition (the centroid is just
+// their mean). Re-run debug/intent-test/intent-node-eval.mjs after editing.
+export const SOCIAL_BANK = {
+    SOCIAL_GREET: [
+        "hello", "hi there", "hey Wren", "good to see you", "well met",
+        "morning", "good evening", "hey", "greetings", "there you are",
+    ],
+    SOCIAL_BYE: [
+        "goodbye", "see you later", "I'm off", "farewell", "bye",
+        "I have to go", "take care", "until next time", "I'm heading out", "that's me done",
+        // Terse farewells embed weakly and were drifting onto movement states
+        // ("see you"→SCOUT, "catch you later"→WAIT); these pull the centroid
+        // toward short goodbyes so they classify as BYE, not a command.
+        "see you around", "catch you soon", "later", "good night",
+    ],
+    SOCIAL_THANKS: [
+        "thank you", "thanks", "cheers", "appreciate it", "thanks for that",
+        "much obliged", "thanks Wren", "nice one, thanks", "I appreciate the help", "ta",
+    ],
+    SOCIAL_PRAISE: [
+        "you're brilliant", "good work", "well done", "you're amazing", "I like you",
+        "you're the best", "you're a great help", "you're wonderful", "glad you're here", "couldn't do this without you",
+    ],
+    SOCIAL_CRITICISM: [
+        "you're useless", "you're rubbish", "that was terrible", "you're no help", "you're annoying",
+        "you're hopeless", "stop messing about", "you're doing it wrong", "I don't like you", "you're letting me down",
+    ],
+    SOCIAL_HOWAREYOU: [
+        "how are you", "how are you doing", "you alright", "how do you feel", "everything ok with you",
+        "how's it going", "you holding up", "are you well", "how have you been", "hey, how are you",
+    ],
+    SOCIAL_LOCATION: [
+        "where are we", "what is this place", "where am I", "what's this area", "do you know this place",
+        "where are we now", "what place is this", "tell me about this place", "what is this area", "have you been here before",
+    ],
+    SOCIAL_WHATNEXT: [
+        "what do we do now", "what's next", "where to now", "what should I do", "what now",
+        "any ideas", "what's the plan", "where do we go from here", "what should we do next", "got a plan",
+    ],
+};
+
+// Ordered list of social-intent keys (parity with STATES / ASK_INTENTS).
+export const SOCIAL_INTENTS = Object.keys(SOCIAL_BANK);
+
+// Response lines per social intent, in Wren's voice — rotated like ACK_LINES so
+// they don't repeat. Tier 1 has no TTS, so these strings are what the companion
+// "says" (shown on the NPC HUD; an optional prebaked-clip bank in acks.js can
+// voice them). location/whatnext are PLACE-FIXED (the archery range) — a fully
+// scripted answer that needs no game state. Keep short, warm, a touch dry.
+export const SOCIAL_LINES = {
+    SOCIAL_GREET: ["Hello there.", "Ah — there you are.", "Good to see you up and about."],
+    SOCIAL_BYE: ["Take care, then.", "Until next time.", "Mind how you go."],
+    SOCIAL_THANKS: ["Anytime.", "Think nothing of it.", "That's what I'm here for."],
+    SOCIAL_PRAISE: ["Kind of you to say.", "Ha — you're not so bad yourself.", "I'll take that."],
+    SOCIAL_CRITICISM: ["Noted. I'll do better.", "Steady on — I'm doing my best.", "Fair enough. Point taken."],
+    SOCIAL_HOWAREYOU: ["Right as rain, thanks.", "Can't complain. You?", "Sharp and ready."],
+    SOCIAL_LOCATION: ["The old archery range — good place to find your aim.", "Home ground. Targets are downrange.", "Just the range. Quiet, for now."],
+    SOCIAL_WHATNEXT: ["Keep at the targets — tighten those groupings.", "Pick your mark and draw. I'll watch.", "Plenty of shooting left. When you're ready."],
+};
+
 // Banter / "say again" fallbacks — returned when an utterance is NOT a confident
 // command (chatter, a question, an unclear order). The FSM stays put. Kept light
 // and in-character so a misheard order or a bit of chat still feels like Wren.

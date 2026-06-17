@@ -22,6 +22,7 @@ import { prof } from "./profiler.js";
 import { VoicePanel } from "./voicepanel.js";
 import { Addressing } from "./addressing.js";
 import { Barks } from "./barks.js";
+import { Acks } from "./acks.js";
 import { TurnDetector } from "./turn.js";
 // VAD + the turn-detector model scorers run in a Web Worker (voice-worker.js) so
 // their ORT/wasm inference never stalls the XR render loop — these are the off-main
@@ -512,6 +513,13 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
                     // must re-assert FOLLOW even when already in it). The NPC boots on
                     // wander (command=null) until the first command arrives.
                     _scriptedBrain.onCommand(cmd => ctx.npcs?.npcs?.[0]?.brain?.setCommand(cmd.state));
+                    // Voice the brain's Stage-B response from the prebaked clip bank
+                    // (acks.js) — a movement-ack on a command, a small-talk line on a
+                    // social intent. The clip index comes from the brain (which line
+                    // it rotated to); graceful-silent until the clips are baked. This
+                    // gives the text-only Tier-1 companion an audible reply.
+                    _scriptedBrain.onCommand(cmd => ctx.acks?.playAck(cmd.state, cmd.ackIndex));
+                    _scriptedBrain.onSocial(s => ctx.acks?.playSocial(s.intent, s.index));
                 }
                 ctx.voicechat.brain = _scriptedBrain;
                 ctx.brainBackend = "scripted";
@@ -668,6 +676,12 @@ installRig(ctx); // window.rig — IWE emulator puppeteering
     // wired today is player_hit_target: we wrap the target's onArrowHit seam so
     // every scoring arrow earns a "Nice shot!" (subject to the bark cooldowns).
     ctx.barks = new Barks(ctx);
+    // Prebaked companion-VOICE clips (acks.js): Stage-A receipt tokens at
+    // turn-complete + Stage-B response clips (movement-ack / small-talk) driven by
+    // the scripted brain's onCommand/onSocial (wired above). Gives the text-only
+    // Tier-1 companion an audible reply; graceful-silent until assets/acks/*.wav
+    // are baked. voicechat fires the receipt token (ctx.acks.playReceipt()).
+    ctx.acks = new Acks(ctx);
     const _onArrowHit = ctx.target?.face?.metadata?.onArrowHit;
     if (_onArrowHit) {
         ctx.target.face.metadata.onArrowHit = (info) => {

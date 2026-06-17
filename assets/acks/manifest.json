@@ -1,0 +1,287 @@
+[
+  {
+    "key": "receipt:0",
+    "text": "Hm.",
+    "file": "ak00"
+  },
+  {
+    "key": "receipt:1",
+    "text": "Mm.",
+    "file": "ak01"
+  },
+  {
+    "key": "receipt:2",
+    "text": "Hmm…",
+    "file": "ak02"
+  },
+  {
+    "key": "receipt:3",
+    "text": "Let me see.",
+    "file": "ak03"
+  },
+  {
+    "key": "receipt:4",
+    "text": "One moment.",
+    "file": "ak04"
+  },
+  {
+    "key": "receipt:5",
+    "text": "Hang on…",
+    "file": "ak05"
+  },
+  {
+    "key": "receipt:6",
+    "text": "Just a tick.",
+    "file": "ak06"
+  },
+  {
+    "key": "receipt:7",
+    "text": "Hm?",
+    "file": "ak07"
+  },
+  {
+    "key": "ack:FOLLOW:0",
+    "text": "Right behind you.",
+    "file": "ak08"
+  },
+  {
+    "key": "ack:FOLLOW:1",
+    "text": "Lead on — I'm with you.",
+    "file": "ak09"
+  },
+  {
+    "key": "ack:FOLLOW:2",
+    "text": "After you, then.",
+    "file": "ak10"
+  },
+  {
+    "key": "ack:WAIT:0",
+    "text": "Holding here.",
+    "file": "ak11"
+  },
+  {
+    "key": "ack:WAIT:1",
+    "text": "I'll wait. Don't be long.",
+    "file": "ak12"
+  },
+  {
+    "key": "ack:WAIT:2",
+    "text": "Staying put — go on.",
+    "file": "ak13"
+  },
+  {
+    "key": "ack:CLOSE:0",
+    "text": "Glued to your side.",
+    "file": "ak14"
+  },
+  {
+    "key": "ack:CLOSE:1",
+    "text": "Close as your shadow.",
+    "file": "ak15"
+  },
+  {
+    "key": "ack:CLOSE:2",
+    "text": "Tucked in tight.",
+    "file": "ak16"
+  },
+  {
+    "key": "ack:SCOUT:0",
+    "text": "On point.",
+    "file": "ak17"
+  },
+  {
+    "key": "ack:SCOUT:1",
+    "text": "Ranging ahead — back shortly.",
+    "file": "ak18"
+  },
+  {
+    "key": "ack:SCOUT:2",
+    "text": "I'll have a look. Eyes open.",
+    "file": "ak19"
+  },
+  {
+    "key": "ack:GUARD:0",
+    "text": "Guard's up.",
+    "file": "ak20"
+  },
+  {
+    "key": "ack:GUARD:1",
+    "text": "Watching your back — let them try.",
+    "file": "ak21"
+  },
+  {
+    "key": "ack:GUARD:2",
+    "text": "Ready for trouble.",
+    "file": "ak22"
+  },
+  {
+    "key": "ack:ENGAGE:0",
+    "text": "On it — let's end this.",
+    "file": "ak23"
+  },
+  {
+    "key": "ack:ENGAGE:1",
+    "text": "Going in!",
+    "file": "ak24"
+  },
+  {
+    "key": "ack:ENGAGE:2",
+    "text": "With pleasure.",
+    "file": "ak25"
+  },
+  {
+    "key": "ack:REST:0",
+    "text": "At ease, then.",
+    "file": "ak26"
+  },
+  {
+    "key": "ack:REST:1",
+    "text": "Good. I'll catch my breath.",
+    "file": "ak27"
+  },
+  {
+    "key": "ack:REST:2",
+    "text": "Standing down — that was close.",
+    "file": "ak28"
+  },
+  {
+    "key": "social:SOCIAL_GREET:0",
+    "text": "Hello there.",
+    "file": "ak29"
+  },
+  {
+    "key": "social:SOCIAL_GREET:1",
+    "text": "Ah — there you are.",
+    "file": "ak30"
+  },
+  {
+    "key": "social:SOCIAL_GREET:2",
+    "text": "Good to see you up and about.",
+    "file": "ak31"
+  },
+  {
+    "key": "social:SOCIAL_BYE:0",
+    "text": "Take care, then.",
+    "file": "ak32"
+  },
+  {
+    "key": "social:SOCIAL_BYE:1",
+    "text": "Until next time.",
+    "file": "ak33"
+  },
+  {
+    "key": "social:SOCIAL_BYE:2",
+    "text": "Mind how you go.",
+    "file": "ak34"
+  },
+  {
+    "key": "social:SOCIAL_THANKS:0",
+    "text": "Anytime.",
+    "file": "ak35"
+  },
+  {
+    "key": "social:SOCIAL_THANKS:1",
+    "text": "Think nothing of it.",
+    "file": "ak36"
+  },
+  {
+    "key": "social:SOCIAL_THANKS:2",
+    "text": "That's what I'm here for.",
+    "file": "ak37"
+  },
+  {
+    "key": "social:SOCIAL_PRAISE:0",
+    "text": "Kind of you to say.",
+    "file": "ak38"
+  },
+  {
+    "key": "social:SOCIAL_PRAISE:1",
+    "text": "Ha — you're not so bad yourself.",
+    "file": "ak39"
+  },
+  {
+    "key": "social:SOCIAL_PRAISE:2",
+    "text": "I'll take that.",
+    "file": "ak40"
+  },
+  {
+    "key": "social:SOCIAL_CRITICISM:0",
+    "text": "Noted. I'll do better.",
+    "file": "ak41"
+  },
+  {
+    "key": "social:SOCIAL_CRITICISM:1",
+    "text": "Steady on — I'm doing my best.",
+    "file": "ak42"
+  },
+  {
+    "key": "social:SOCIAL_CRITICISM:2",
+    "text": "Fair enough. Point taken.",
+    "file": "ak43"
+  },
+  {
+    "key": "social:SOCIAL_HOWAREYOU:0",
+    "text": "Right as rain, thanks.",
+    "file": "ak44"
+  },
+  {
+    "key": "social:SOCIAL_HOWAREYOU:1",
+    "text": "Can't complain. You?",
+    "file": "ak45"
+  },
+  {
+    "key": "social:SOCIAL_HOWAREYOU:2",
+    "text": "Sharp and ready.",
+    "file": "ak46"
+  },
+  {
+    "key": "social:SOCIAL_LOCATION:0",
+    "text": "The old archery range — good place to find your aim.",
+    "file": "ak47"
+  },
+  {
+    "key": "social:SOCIAL_LOCATION:1",
+    "text": "Home ground. Targets are downrange.",
+    "file": "ak48"
+  },
+  {
+    "key": "social:SOCIAL_LOCATION:2",
+    "text": "Just the range. Quiet, for now.",
+    "file": "ak49"
+  },
+  {
+    "key": "social:SOCIAL_WHATNEXT:0",
+    "text": "Keep at the targets — tighten those groupings.",
+    "file": "ak50"
+  },
+  {
+    "key": "social:SOCIAL_WHATNEXT:1",
+    "text": "Pick your mark and draw. I'll watch.",
+    "file": "ak51"
+  },
+  {
+    "key": "social:SOCIAL_WHATNEXT:2",
+    "text": "Plenty of shooting left. When you're ready.",
+    "file": "ak52"
+  },
+  {
+    "key": "fallback:0",
+    "text": "Didn't catch that — say again?",
+    "file": "ak53"
+  },
+  {
+    "key": "fallback:1",
+    "text": "Hm? Run that by me once more.",
+    "file": "ak54"
+  },
+  {
+    "key": "fallback:2",
+    "text": "Not sure what you mean — what's the order?",
+    "file": "ak55"
+  },
+  {
+    "key": "fallback:3",
+    "text": "Come again? The wind ate that one.",
+    "file": "ak56"
+  }
+]
