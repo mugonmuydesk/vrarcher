@@ -12,9 +12,11 @@
 // mechanism the (disabled) teleportation feature uses. Yawing the
 // quaternion in place turns the player about their own head.
 //
-// Gated while an arrow is nocked (ctx.arrows.nocked): the draw hand must
-// never steer mid-shot; both sticks are ignored and velocity bleeds off.
-// Teleportation stays disabled (scene.js) — this replaces it.
+// Locomotion and turning stay live while an arrow is nocked — the player can
+// walk and turn mid-draw. The thumbsticks aren't used by the archery mechanics
+// (nock/draw is trigger + hand-position driven), so there's no input conflict.
+// Only the `enabled` flag gates movement. Teleportation stays disabled
+// (scene.js) — this replaces it.
 
 export const LOCO_TUNING = {
     maxSpeed: 2.5,        // m/s at full stick
@@ -46,7 +48,7 @@ export class Locomotion {
     }
 
     _gated() {
-        return !this.enabled || !!this.ctx.arrows?.nocked;
+        return !this.enabled;
     }
 
     update(dt) {
